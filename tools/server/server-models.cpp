@@ -764,7 +764,6 @@ void server_models::load(const std::string & name) {
                     }
                     mem = meta.dmm_req;
                 }
-                update_status(name, SERVER_MODEL_STATUS_UNLOADED, 0);
                 try {
                     _load(name, mem);
                 } catch (const std::exception & e) {
@@ -800,7 +799,7 @@ void server_models::_load(const std::string & name, const device_memory_map & dm
     std::lock_guard<std::mutex> lk(mutex);
 
     auto meta = mapping[name].meta;
-    if (meta.status != SERVER_MODEL_STATUS_UNLOADED) {
+    if (meta.status != SERVER_MODEL_STATUS_UNLOADED && meta.status != SERVER_MODEL_STATUS_DOWNLOADING) {
         SRV_INF("model %s is not ready\n", name.c_str());
         return;
     }
