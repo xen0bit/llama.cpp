@@ -1,14 +1,14 @@
 #include "models.h"
 
 ggml_tensor * llm_build_eagle3_encode::build_inp_embd() const {
-    const int64_t n_embd_target_features = 3 * hparams.eagle3_target_hidden_size;
+    const int64_t n_embd_inp = hparams.n_embd_inp();
 
     ggml_tensor * cur = nullptr;
 
     // Input: Target model features (3 layers concatenated: low, mid, high)
     // Data will be provided via ubatch->embd in encode_eagle3_features()
-    auto inp_target = std::make_unique<llm_graph_input_embd>(n_embd_target_features);
-    inp_target->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd_target_features, n_tokens);
+    auto inp_target = std::make_unique<llm_graph_input_embd>(n_embd_inp);
+    inp_target->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd_inp, n_tokens);
     ggml_set_input(inp_target->embd);
 
     cur = inp_target->embd;
@@ -26,6 +26,9 @@ llm_build_eagle3_encode::llm_build_eagle3_encode(const llama_model & model, cons
     ggml_tensor * cur = nullptr;
 
     cur = build_inp_embd();
+
+    // sanity check
+    GGML_ASSERT(hparams.n_embd_inp() == model.fc->ne[0]);
 
     // Feature fusion layer
     cur = build_lora_mm(model.fc, cur);

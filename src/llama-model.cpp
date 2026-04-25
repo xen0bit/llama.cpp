@@ -2774,9 +2774,9 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                                hparams.eagle3_extract_layers[2]);
 
                 // EAGLE3 target model hidden size
-                ml.get_key(LLM_KV_EAGLE3_TARGET_HIDDEN_SIZE, hparams.eagle3_target_hidden_size);
+                ml.get_key(LLM_KV_EAGLE3_TARGET_HIDDEN_SIZE, hparams.n_embd_inp_impl);
                 LLAMA_LOG_INFO("%s: EAGLE3 target_hidden_size = %u (draft n_embd = %u)\n", __func__,
-                               hparams.eagle3_target_hidden_size, hparams.n_embd);
+                               hparams.n_embd_inp_impl, hparams.n_embd);
 
                 // EAGLE3 norm_before_residual (optional, default false)
                 // compatible with Readhat eagle3 speculator model
@@ -7285,7 +7285,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                 } break;
             case LLM_ARCH_EAGLE3:
                 {
-                    const int64_t n_embd_target_features = 3 * hparams.eagle3_target_hidden_size;
+                    const int64_t n_embd_inp = hparams.n_embd_inp();
                     const int64_t n_embd_attn_input = 2 * n_embd;
 
                     // Get vocab size from the d2t tensor in the GGUF file (optional - only needed if EAGLE3 has different vocab_size than target)
@@ -7302,7 +7302,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                     }
 
                     // Feature fusion layer: projects 3 target layers to draft hidden size
-                    fc = create_tensor(tn(LLM_TENSOR_EAGLE3_FC, "weight"), {n_embd_target_features, n_embd}, 0);
+                    fc = create_tensor(tn(LLM_TENSOR_EAGLE3_FC, "weight"), {n_embd_inp, n_embd}, 0);
 
                     // Output layer (uses draft vocab size)
                     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
@@ -9178,7 +9178,7 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
     // TODO: move reranking logic here and generalize
     llm->build_dense_out(dense_2_out_layers, dense_2_out_layers_b, dense_3_out_layers);
 
-    llm->res->set_outputs();
+    llm->res->set_outputs(params);
 
     return llm->res->get_gf();
 }
@@ -9582,4 +9582,12 @@ ggml_backend_dev_t llama_model_get_device(const struct llama_model * model, int 
         return nullptr;
     }
     return model->devices[i].dev;
+}
+
+ggml_tensor * llama_model_get_tok_embd(const struct llama_model * model) {
+    return model->tok_embd;
+}
+
+void llama_model_set_tok_embd(struct llama_model * model, ggml_tensor * tensor) {
+    model->tok_embd = tensor;
 }
