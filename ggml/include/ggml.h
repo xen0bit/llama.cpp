@@ -563,6 +563,7 @@ extern "C" {
         GGML_OP_GATED_DELTA_NET,
         GGML_OP_LIGHTNING_INDEXER,
         GGML_OP_DSV4_HC_SPLIT_SINKHORN,
+        GGML_OP_DSV4_HC_WEIGHTED_SUM,
         GGML_OP_DSV4_HC_EXPAND,
         GGML_OP_DSV4_FP8_KV_QUANTIZE,
         GGML_OP_DSV4_ROPE_TAIL,
@@ -2567,6 +2568,13 @@ extern "C" {
             int                   n_hc,
             int                   sinkhorn_iters,
             float                 eps);
+
+    // DeepSeek V4 hyperconnection weighted-sum helper.
+    // Computes sum_hc weights[hc, token] * x[embd, hc, token].
+    GGML_API struct ggml_tensor * ggml_dsv4_hc_weighted_sum(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * weights);
 
     // DeepSeek V4 hyperconnection expand helper.
     // Computes post * block_out + comb^T @ residual for each token.
