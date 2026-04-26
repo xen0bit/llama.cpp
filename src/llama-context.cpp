@@ -2074,7 +2074,13 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         return std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
     }
     if (model.arch == LLM_ARCH_DEEPSEEK4) {
-        return std::max<uint32_t>(4096u, n_tokens * 64 + 32u * model.n_tensors());
+        // DeepSeek V4 has a position-dependent compressed-attention decode path
+        // that creates many temporary tensor objects, especially when a long
+        // prompt is split into non-prefill ubatches. The visible graph node
+        // count is much smaller than the number of GGML objects allocated while
+        // building those graphs, so reserve a larger metadata arena than the
+        // generic tensor-count heuristic would provide.
+        return std::max<uint32_t>(262144u, n_tokens * 192 + 64u * model.n_tensors());
     }
     uint32_t res = std::max<uint32_t>(1024u, 8u*model.n_tensors());
     for (const auto & lora : model.loras) {
