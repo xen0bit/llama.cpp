@@ -499,9 +499,11 @@ static dsv4_hc_mix dsv4_hc_pre(
     ggml_tensor * pre = ggml_view_2d(ctx, split, n_hc, n_tokens, split->nb[1], 0);
     ggml_tensor * post = ggml_view_2d(ctx, split, n_hc, n_tokens, split->nb[1], n_hc * split->nb[0]);
     ggml_tensor * comb = ggml_view_2d(ctx, split, n_hc * n_hc, n_tokens, split->nb[1], 2 * n_hc * split->nb[0]);
-    pre = ggml_cont(ctx, pre);
-    post = ggml_cont(ctx, post);
-    comb = ggml_cont(ctx, comb);
+    if (n_tokens != 1) {
+        pre = ggml_cont(ctx, pre);
+        post = ggml_cont(ctx, post);
+        comb = ggml_cont(ctx, comb);
+    }
     comb = ggml_reshape_3d(ctx, comb, n_hc, n_hc, n_tokens); // [src_hc, dst_hc, n_tokens]
     ggml_tensor * x_hdt = ggml_cont(ctx, ggml_permute(ctx, x, 1, 0, 2, 3)); // [hc, n_embd, n_tokens]
     ggml_tensor * pre_h1t = ggml_reshape_3d(ctx, pre, n_hc, 1, n_tokens);
