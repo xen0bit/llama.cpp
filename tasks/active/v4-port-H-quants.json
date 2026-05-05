@@ -164,6 +164,34 @@
       "agent": "user",
       "note": "Codex plan-review v4 APPROVE'd round 1. Orchestrator escalated to needs-human only because its harness lacked Agent tool to dispatch builder \u2014 not a plan defect. Parent session has Agent; takes over pipeline directly. State -> implementing; dispatching builder subagent for Tasks 1-9 of plan v4 in worktree feat/v4-port-H-quants off feat/v4-port.",
       "verdict": "plan-approved-parent-takes-over"
+    },
+    {
+      "at": "2026-05-06T19:00:00Z",
+      "from": "implementing",
+      "to": "implementing",
+      "agent": "builder",
+      "note": "Plan Task 1 complete: preconditions verified (46 safetensors, V4 arch confirmed, V3.2 entries at constants.py:445/932/2851/4020 + class at convert_hf_to_gguf.py:9221, DEEPSEEK4 absent, 1.4 TiB free, antirez remote OK)."
+    },
+    {
+      "at": "2026-05-06T19:30:00Z",
+      "from": "implementing",
+      "to": "implementing",
+      "agent": "builder",
+      "note": "Plan Task 2 complete: gguf-py V4 surgical port committed (93d1b94d9). Both DEEPSEEK32 (37 tensors) and DEEPSEEK4 (41 tensors) coexist; all 8 writer helpers added; SOFTMAX_WEIGHT/SQRTSOFTPLUS added to ExpertGatingFuncType."
+    },
+    {
+      "at": "2026-05-06T20:30:00Z",
+      "from": "implementing",
+      "to": "implementing",
+      "agent": "builder",
+      "note": "Plan Task 3 complete (3.A-3.I): DeepseekV4Model class added to convert_hf_to_gguf.py (01a13fa01). All antirez touch surface covered: imports + TORCH_FLOAT8_E8M0FNU; LazyTorchTensor F8_E8M0 dtype maps; TextModel sqrtsoftplus branch; argparse --deepseek4-* flags + outtype choices; ModelBase.__init__ signature; ftype_map iq2_xxs/iq2_xs/q2_k; model_class call site; ~626-line DeepseekV4Model class with FP8/I8/FP4 dequant pipeline. ModelBase.from_model_architecture confirms both DeepseekV32Model and DeepseekV4Model registered."
+    },
+    {
+      "at": "2026-05-06T21:00:00Z",
+      "from": "implementing",
+      "to": "implementing",
+      "agent": "builder",
+      "note": "Plan Task 4 complete: smoke test passed. Required uv venv with torch>=2.7 (for float8_e8m0fnu) and transformers~=4.50 (5.5.1 broke V4 config parsing). 2-layer conversion produced /tmp/v4-smoke.gguf (15.1G); gate-loader.sh PASSED with arch=deepseek4 detected. All 47 tensor patterns from cloned safetensors are handled by DeepseekV4Model._map_tensor_name_deepseek4 + _prepare_deepseek4_scaled_tensors."
     }
   ],
   "errors": [
