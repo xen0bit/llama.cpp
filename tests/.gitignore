@@ -1,6 +1,7 @@
 *
 !*.*
 !snapshots/
+!v4-port/
 *.o
 ggml-common.h
 **/*.swp
