@@ -43,7 +43,7 @@
   {%- if message['role'] == 'user' -%}
     {{- '<｜User｜>' + (message['content'] or '') -}}
     {%- set ns.pending_assistant = true -%}
-    {%- set ns.pending_tool_result = false -%}
+    {%- set ns.pending_tool_result = true -%}
   {%- elif message['role'] == 'tool' -%}
     {%- if not ns.pending_tool_result -%}
       {{- '<｜User｜>' -}}
