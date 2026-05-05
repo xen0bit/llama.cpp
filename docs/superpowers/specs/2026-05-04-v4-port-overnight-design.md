@@ -247,16 +247,20 @@ curl -s localhost:8080/v1/chat/completions -d @<test-payload>.json
 
 ### What the orchestrator must NOT do
 
-- Push to `origin` (ggml-org/llama.cpp upstream)
+- Push to `origin` (ggml-org/llama.cpp upstream) — this is the line that alerts maintainers
 - Run `gh pr create` against any repo
-- Touch `master` or `deepseek-dsa` branches
+- Touch `deepseek-dsa` or `feat/v4-roadmap` branches (read-only references)
 - Run destructive git operations on uncommitted work
 - `rm -rf` anything outside `build/` or worktree dirs
 
+The orchestrator MAY push to `mine` (cchuter/llama.cpp) freely, including pushing/merging to `mine/master`. The boundary is `origin` (upstream), not `master` (which is just a branch on our fork).
+
 ### User authorization (granted during brainstorm)
 
-- May push feature branches (including `feat/v4-port` and worktree branches) to `mine` without further approval
-- May NOT merge `feat/v4-port` into `mine/master` — it stays as a branch
+- May push any branch (including `feat/v4-port`, worktree branches, and `master`) to `mine`
+- May merge `feat/v4-port` into `mine/master` if streams complete cleanly
+- May NOT push to `origin` (ggml-org/llama.cpp) — that's the line that surfaces work to upstream maintainers
+- May NOT run `gh pr create` against any repo
 - May iterate up to 16 rounds (8 codex + 8 builder) per stream
 - "Don't block unless we have to"
 
