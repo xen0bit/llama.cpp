@@ -25,10 +25,27 @@ for i in $(seq 1 5); do
     -d @"$FIXTURE")
   echo "Request $i: HTTP $HTTP"
   if [ "$HTTP" = "200" ]; then
-    if grep -q '"tool_calls"' /tmp/tools-resp-$i.json; then
+    if python3 - "$i" <<'PY'
+import json, sys
+i = sys.argv[1]
+try:
+    with open(f'/tmp/tools-resp-{i}.json') as f:
+        d = json.load(f)
+except Exception as e:
+    print(f'FAIL: response {i} not valid JSON: {e}'); sys.exit(1)
+choices = d.get('choices', [])
+if not choices:
+    print('FAIL: no choices'); sys.exit(1)
+msg = choices[0].get('message', {})
+tc = msg.get('tool_calls')
+if not isinstance(tc, list) or len(tc) == 0:
+    print('FAIL: tool_calls not a non-empty array'); sys.exit(1)
+print(f'OK: {len(tc)} tool_call(s)')
+PY
+    then
       PASS=$((PASS+1))
     else
-      echo "  FAIL: 200 but no tool_calls in body"
+      echo "  FAIL: 200 but tool_calls validation failed for response $i"
       head -c 500 /tmp/tools-resp-$i.json
     fi
   else
