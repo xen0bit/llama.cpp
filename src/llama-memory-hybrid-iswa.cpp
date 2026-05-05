@@ -713,12 +713,21 @@ void llama_memory_hybrid_iswa::dsv4_state_read(llama_io_read_i & io, llama_seq_i
         dsv4_clear_seq(seq_id);
     }
 
+    // scratch buffer for skipping non-matching sequence blocks in targeted-restore mode
+    std::vector<uint8_t> skip_buf;
+
     for (uint32_t is = 0; is < n_seq; ++is) {
         llama_seq_id src_seq_id;
         io.read(&src_seq_id, sizeof(src_seq_id));
 
+        // targeted restore: when caller requested a specific destination seq, only
+        // consume blocks whose src_seq_id matches. Without this guard, every
+        // serialized source sequence would be merged into the destination slot,
+        // silently corrupting state.
+        const bool skip_block = (seq_id != -1 && src_seq_id != seq_id);
+
         const llama_seq_id dst_seq_id = seq_id == -1 ? src_seq_id : seq_id;
-        if (dst_seq_id < 0 || (uint32_t) dst_seq_id >= dsv4_n_seq_max) {
+        if (!skip_block && (dst_seq_id < 0 || (uint32_t) dst_seq_id >= dsv4_n_seq_max)) {
             throw std::runtime_error("failed to restore DeepSeek V4 compressed KV cache: invalid sequence id");
         }
 
@@ -733,8 +742,15 @@ void llama_memory_hybrid_iswa::dsv4_state_read(llama_io_read_i & io, llama_seq_i
                 }
                 if (n_rows > 0) {
                     const size_t row_size = dsv4_cache_row_size(layer.attn_k);
-                    io.read_tensor(layer.attn_k,
-                            dsv4_cache_offset(layer.attn_k, dst_seq_id, 0), (size_t) n_rows*row_size);
+                    const size_t nbytes   = (size_t) n_rows * row_size;
+                    if (skip_block) {
+                        // advance io past this block's bytes without restoring
+                        skip_buf.resize(nbytes);
+                        io.read(skip_buf.data(), nbytes);
+                    } else {
+                        io.read_tensor(layer.attn_k,
+                                dsv4_cache_offset(layer.attn_k, dst_seq_id, 0), nbytes);
+                    }
                 }
             }
 
@@ -746,8 +762,15 @@ void llama_memory_hybrid_iswa::dsv4_state_read(llama_io_read_i & io, llama_seq_i
                 }
                 if (n_rows > 0) {
                     const size_t row_size = dsv4_cache_row_size(layer.index_k);
-                    io.read_tensor(layer.index_k,
-                            dsv4_cache_offset(layer.index_k, dst_seq_id, 0), (size_t) n_rows*row_size);
+                    const size_t nbytes   = (size_t) n_rows * row_size;
+                    if (skip_block) {
+                        // advance io past this block's bytes without restoring
+                        skip_buf.resize(nbytes);
+                        io.read(skip_buf.data(), nbytes);
+                    } else {
+                        io.read_tensor(layer.index_k,
+                                dsv4_cache_offset(layer.index_k, dst_seq_id, 0), nbytes);
+                    }
                 }
             }
         }

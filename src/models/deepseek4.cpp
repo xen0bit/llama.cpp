@@ -1439,6 +1439,8 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
         cb(cur, "ffn_norm", il);
         ggml_tensor * selected = nullptr;
         if ((uint32_t) il < hparams.n_hash_layers && !cparams.warmup) {
+            GGML_ASSERT(inp_tokens != nullptr &&
+                "DeepSeek V4 hash routing requires token-id input; embedding-only / multimodal input not supported");
             selected = ggml_get_rows(ctx0, layer.ffn_gate_tid2eid, inp_tokens);
             cb(selected, "ffn_moe_hash_topk", il);
         }
