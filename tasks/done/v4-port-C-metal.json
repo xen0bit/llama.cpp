@@ -27,15 +27,17 @@
       "from": "implementing",
       "to": "done",
       "agent": "builder",
-      "note": "Cherry-picked b67f5db5c (Metal HC decode optimization) and 2f2d44052 (V4 prompt replay speed-up); skipped 57c4283b5 (empty after upstream cleanup). Bumped GGML_OP_COUNT static_assert from 101 to 102 (cherry-pick was relative to base 100; we already had LIGHTNING_INDEXER op so antirez's WEIGHTED_SUM puts us at 102). Migrated gate-speed.sh from llama-cli to llama-completion (same pattern Task B applied to gate-coherence.sh). Build: PASS. Coherence (Metal NGL=999): PASS gen='Paris. The capital of Italy is Rome...'. Coherence (CPU NGL=0): PASS (no regression). Speed (Metal): PASS at 25.91 tok/s — exceeds antirez's 21.1 tok/s on M3 Max."
+      "note": "Cherry-picked b67f5db5c (Metal HC decode optimization) and 2f2d44052 (V4 prompt replay speed-up); skipped 57c4283b5 (empty after upstream cleanup). Bumped GGML_OP_COUNT static_assert from 101 to 102 (cherry-pick was relative to base 100; we already had LIGHTNING_INDEXER op so antirez's WEIGHTED_SUM puts us at 102). Migrated gate-speed.sh from llama-cli to llama-completion (same pattern Task B applied to gate-coherence.sh). Build: PASS. Coherence (Metal NGL=999): PASS gen='Paris. The capital of Italy is Rome...'. Coherence (CPU NGL=0): PASS (no regression). Speed (Metal): PASS at 25.91 tok/s \u2014 exceeds antirez's 21.1 tok/s on M3 Max."
+    },
+    {
+      "at": "2026-05-05T06:47:27Z",
+      "from": "code-review",
+      "to": "done",
+      "agent": "codex",
+      "note": "APPROVED r1 (no issues found)"
     }
   ],
-  "test_report": {
-    "build": "PASS",
-    "coherence_metal": "PASS",
-    "coherence_cpu": "PASS",
-    "speed_metal": "PASS (25.91 tok/s, min 10)"
-  },
+  "test_report": "gate-coherence Metal: PASS / gate-speed: PASS 25.91 tok/s",
   "errors": [],
   "in_progress": false,
   "depends_on": [
