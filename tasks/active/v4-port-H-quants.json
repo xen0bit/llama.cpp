@@ -1,7 +1,7 @@
 {
   "id": "v4-port-H-quants",
   "title": "Produce Q4_K_M GGUF for DeepSeek V4 Flash",
-  "state": "plan-review",
+  "state": "roadmap",
   "branch": "feat/v4-port-H-quants",
   "parent_branch": "feat/v4-port",
   "spec_path": ".claude/agents/v4-port-H-quants.md",
@@ -73,6 +73,31 @@
       "to": "plan-review",
       "agent": "human",
       "note": "Cleared in_progress: previous orchestrator backgrounded codex and exited prematurely (codex went orphan PID 25524 PPID=1, killed). Output was not captured \u2014 stdout was attached to dead orchestrator's pipe. Re-dispatching with explicit synchronous-codex instruction."
+    },
+    {
+      "at": "2026-05-05T22:30:00Z",
+      "from": "plan-review",
+      "to": "plan-review",
+      "agent": "codex",
+      "note": "Round 1 codex plan-review of v2 (high reasoning, sandbox=read-only, synchronous tee to /tmp/v4-H-plan-review-v2.log). Verdict REVISE with 2 substantive blocking issues, both verified against antirez source: (1) port mechanics would silently delete V3.2/DSA support because antirez's diff is NOT additive \u2014 it renames DEEPSEEK32->DEEPSEEK4 and DeepseekV32ForCausalLM->DeepseekV4Model; the 'git checkout antirez/main -- <file>' approach plus the patch-fallback both fail to merge, they replace; (2) f16 conversion path unreachable \u2014 antirez's DeepseekV4Model._write_deepseek4_expert_tensors raises NotImplementedError for FP4 routed experts unless --outtype is one of iq2_xxs/iq2_xs/q2_k/tq2_0/tq1_0/q8_0 (verified at antirez/main:convert_hf_to_gguf.py:9532-9539), so 'python3 convert_hf_to_gguf.py ... --outtype f16' will fail at conversion time. Plan needs explicit FP4-aware intermediate strategy (likely q8_0 intermediate) and must verify the q8_0 -> Q4_K_M llama-quantize path is valid for V4.",
+      "verdict": "REVISE",
+      "review_round": 1
+    },
+    {
+      "at": "2026-05-05T22:35:00Z",
+      "from": "plan-review",
+      "to": "needs-human",
+      "agent": "orchestrator",
+      "note": "Escalating to needs-human at review_round=1 (rather than waiting for round 2) for two reasons: (1) Codex caught real, verified plan defects on the human-authored v2 plan \u2014 both issues require non-trivial plan revision (FP4 expert handling strategy, additive-vs-replacing port mechanics) that should be reasoned about by the plan author, not auto-approved; (2) the harness this orchestrator runs in does NOT expose an Agent/Task tool for sub-agent dispatch (verified via ToolSearch \u2014 only EnterWorktree/ExitWorktree/Monitor/TaskStop/etc. surfaced, no Agent/Task), so the dispatch instruction's required builder-via-Agent step is unreachable from this session even if plan-review eventually APPROVE'd. The previous v1->v2 cycle used the same escalation pattern: codex REVISE, human rewrites the plan offline, re-dispatches. Same path here: human revises plan v2->v3 to address the two issues in errors[], then re-dispatches. Codex log preserved at /tmp/v4-H-plan-review-v2.log for reference.",
+      "verdict": "needs-human"
+    },
+    {
+      "at": "2026-05-06T16:00:00Z",
+      "from": "needs-human",
+      "to": "roadmap",
+      "agent": "user",
+      "note": "Plan rewritten as v3 addressing both v2 codex findings: (1) replaced wholesale `git checkout antirez/main -- file` with surgical V4-additive port that preserves V3.2 entries (Task 2 Step 4 and Task 3 Step 4 explicitly verify both DEEPSEEK32 and DEEPSEEK4 coexist after each port operation); (2) changed `--outtype f16` to `--outtype q8_0` throughout (V4 FP4 routed experts force a compact output type per antirez's `_write_deepseek4_expert_tensors` constraint). Disk requirement reduced from 800 GiB to 500 GiB. Spec at .claude/agents/v4-port-H-quants.md updated with v3 plan reference and refined conflict resolution rule. Errors[] cleared since v3 plan addresses both. Ready for re-dispatch.",
+      "verdict": "v3-plan-written"
     }
   ],
   "errors": []
