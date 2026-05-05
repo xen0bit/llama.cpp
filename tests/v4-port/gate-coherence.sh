@@ -23,7 +23,7 @@ awk "BEGIN { if (($PRINTABLE / $TOTAL) < 0.80) exit 1 }" || { echo "FAIL: <80% p
 
 # Extract decode token count from "eval time = ... / N tokens" line specifically.
 # Anchor on leading whitespace + "eval time" (excludes "prompt eval time" and "total time").
-TOKEN_COUNT=$(echo "$OUT" | grep -E '^[[:space:]]*eval time\s*=' | grep -oE '/ [0-9]+ tokens' | head -1 | awk '{print $2}')
+TOKEN_COUNT=$(echo "$OUT" | grep -E '^[[:space:]]*eval time\s*=' | grep -oE '/[[:space:]]*[0-9]+[[:space:]]+tokens' | head -1 | grep -oE '[0-9]+')
 TOKEN_COUNT=${TOKEN_COUNT:-0}
 echo "Decode tokens: $TOKEN_COUNT"
 if [ "$TOKEN_COUNT" -lt 25 ]; then
