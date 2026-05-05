@@ -1,0 +1,21 @@
+{
+  "id": "v4-port-H-quants",
+  "title": "Produce Q4_K_M GGUF for DeepSeek V4 Flash",
+  "state": "roadmap",
+  "branch": "feat/v4-port-H-quants",
+  "parent_branch": "feat/v4-port",
+  "spec_path": ".claude/agents/v4-port-H-quants.md",
+  "plan_path": "docs/superpowers/plans/2026-05-05-v4-port-H-quants.md",
+  "review_rounds": 0,
+  "fix_attempts": 0,
+  "history": [
+    {
+      "at": "2026-05-05T20:00:00Z",
+      "from": null,
+      "to": "roadmap",
+      "agent": "user",
+      "note": "Created. Plan pre-written per docs/superpowers/specs/2026-05-05-v4-quants-kvcache-design.md. Architect should adopt the plan and proceed directly to plan-review."
+    }
+  ],
+  "errors": []
+}

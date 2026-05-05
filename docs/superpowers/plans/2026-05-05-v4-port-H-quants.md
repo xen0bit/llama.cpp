@@ -12,7 +12,7 @@
 
 ## Worktree / branch setup
 
-This task runs after Task G has merged into `feat/v4-port`. Worktree off `feat/v4-port`:
+This task runs first (Task G follows after H merges). Worktree off `feat/v4-port`:
 
 ```bash
 cd /Users/cchuter/work/llama.cpp
@@ -414,7 +414,7 @@ Save this for the completion doc (Task 7).
 
 **Files:** none modified
 
-**Why:** End-to-end validation that the converter produced a correct GGUF and the quantization didn't break anything. Gates exercise loader, coherence, decode speed, tools, chat, and (post-G-merge) q8 KV behavior.
+**Why:** End-to-end validation that the converter produced a correct GGUF and the quantization didn't break anything. Gates exercise loader, coherence, decode speed, tools, and chat. (Task G's `gate-server-chat-q8.sh` is not yet wired in — H runs first.)
 
 - [ ] **Step 1: Run all gates against Q4_K_M**
 
@@ -429,7 +429,6 @@ Expected: `ALL GATES PASS` at the end. Specifically:
 - `gate-speed`: ≥10 tok/s decode (M3 Ultra should easily exceed)
 - `gate-tools`: 5/5 successful tool_calls
 - `gate-server-chat`: 3/3 coherent chat completions
-- `gate-server-chat-q8`: coherent + WARN observed (from Task G)
 
 - [ ] **Step 2: Capture Q4_K_M decode speed for the completion doc**
 
@@ -574,7 +573,7 @@ git push mine feat/v4-port-H-quants
 Verify each item in the spec's DoD section:
 - [x] `convert_hf_to_gguf.py` recognizes `DeepseekV4ForCausalLM` (and `DeepseekV4FlashForCausalLM` if applicable)
 - [x] `~/models/DeepSeek-V4-Flash-Q4_K_M.gguf` exists, valid (passes `gate-loader.sh`)
-- [x] `run-all-gates.sh` (incl. `gate-server-chat-q8.sh` from G) all PASS against Q4_K_M
+- [x] `run-all-gates.sh` (loader, coherence×2, speed, tools, server-chat — gate-server-chat-q8 is a Task G followup) all PASS against Q4_K_M
 - [x] Decode tok/s recorded for the new quant
 - [x] Followup writeup committed
 - [x] Branch pushed to `mine`

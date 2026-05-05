@@ -26,21 +26,27 @@ dev-team pipeline well.
 
 ## Decomposition
 
-Two tasks, executed sequentially on per-task feature branches:
+Two tasks, executed sequentially on per-task feature branches. **H first**
+because the Q4_K_M quant unblocks meaningful improvements to agentic
+behavior (the IQ2XXS we have was confusing `numpy.linalg.eig` with
+`scipy.linalg.eig` in terminal-bench — exactly the API recall a 4-bit quant
+should fix). G follows because the q8 KV bug is already worked around in
+the launcher (`claude-cache-proxy/start-server-v4.sh` doesn't pass those
+flags), so finishing the underlying fix is hygiene, not unblocking.
 
 ```
-feat/v4-port  ──┬─→ feat/v4-port-G-kv-q8  ──merge──→ feat/v4-port  ──┬─→ feat/v4-port-H-quants  ──merge──→ feat/v4-port
-                │                                                    │
-                G dispatched now                                     H dispatched once base weights finish cloning
+feat/v4-port  ──┬─→ feat/v4-port-H-quants  ──merge──→ feat/v4-port  ──┬─→ feat/v4-port-G-kv-q8  ──merge──→ feat/v4-port
+                │                                                     │
+                H dispatched now (base weights cloned)                G dispatched after H merges
 ```
 
 **Why sequential, not parallel.**
-- Both tasks need the M3 Ultra for validation. Concurrent server boots would
-  thrash GPU/disk.
-- H validates new quants by running gates that exercise the KV cache. Better
-  to land G's fix first so H's pass/fail isn't muddied by the q8 KV bug.
-- Wall-clock is fine: G is ~1-2 days of focused work; H is gated on a
-  multi-hour download and ~2 hours of convert+quantize+gate runs anyway.
+- Both tasks need the M3 Ultra for validation. Concurrent server boots
+  would thrash GPU/disk.
+- Q4_K_M (from H) becomes available as additional regression coverage for
+  G's q8-KV fix — G can validate against both IQ2XXS and Q4_K_M.
+- Wall-clock is fine: H is ~2 hours of convert+quantize+gate runs; G is
+  ~1-2 days of focused investigation work.
 
 **Why per-task branches.**
 - Both touch significant code surface (G touches kernels possibly; H touches
@@ -297,13 +303,12 @@ pushes, then dispatches H.
 
 ### Dispatch order
 
-1. **Now:** write specs (`.claude/agents/v4-port-G-kv-q8.md`,
-   `.claude/agents/v4-port-H-quants.md`) and JSONs (`tasks/active/...`).
-   Commit them on `feat/v4-port`.
-2. **Now:** dispatch the dev-team orchestrator with G only in the task list
+1. **Now:** write H's spec (`.claude/agents/v4-port-H-quants.md`) and JSON
+   (`tasks/active/v4-port-H-quants.json`). Commit on `feat/v4-port`.
+2. **Now:** dispatch the dev-team orchestrator with H only in the task list
    (background agent).
-3. **After G merges to `feat/v4-port`:** confirm base weights cloned, then
-   dispatch the orchestrator with H only.
+3. **After H merges to `feat/v4-port`:** write G's spec and JSON, commit,
+   dispatch the orchestrator with G only.
 
 ### Cross-cutting ground rules
 
