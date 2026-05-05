@@ -1,7 +1,7 @@
 {
   "id": "v4-port-H-quants",
   "title": "Produce Q4_K_M GGUF for DeepSeek V4 Flash",
-  "state": "roadmap",
+  "state": "plan-review",
   "branch": "feat/v4-port-H-quants",
   "parent_branch": "feat/v4-port",
   "spec_path": ".claude/agents/v4-port-H-quants.md",
@@ -56,8 +56,23 @@
       "from": "needs-human",
       "to": "roadmap",
       "agent": "user",
-      "note": "Plan rewritten as v2 (cherry-pick antirez's existing V4 converter from antirez/main, mirroring the Task A runtime port playbook). Both gguf-py V4 enums (~235 lines) and convert_hf_to_gguf.py V4 class (~1082 lines) come from antirez's known-good fork — the same fork that produced the IQ2XXS GGUF we've been running. v1's design-from-scratch error class is eliminated. Spec at .claude/agents/v4-port-H-quants.md updated with the v2 plan reference and conflict resolution rule. Ready for re-dispatch.",
+      "note": "Plan rewritten as v2 (cherry-pick antirez's existing V4 converter from antirez/main, mirroring the Task A runtime port playbook). Both gguf-py V4 enums (~235 lines) and convert_hf_to_gguf.py V4 class (~1082 lines) come from antirez's known-good fork \u2014 the same fork that produced the IQ2XXS GGUF we've been running. v1's design-from-scratch error class is eliminated. Spec at .claude/agents/v4-port-H-quants.md updated with the v2 plan reference and conflict resolution rule. Ready for re-dispatch.",
       "verdict": "v2-plan-written"
+    },
+    {
+      "at": "2026-05-05T21:00:00Z",
+      "from": "roadmap",
+      "to": "plan-review",
+      "agent": "architect",
+      "note": "Plan v2 pre-written; adopting docs/superpowers/plans/2026-05-05-v4-port-H-quants.md as-is per spec/orchestrator override. Preconditions verified: ~/models/DeepSeek-V4-Flash/ clone complete (46 safetensors, no .lock/.tmp), config.json shows architectures=['DeepseekV4ForCausalLM'] model_type=deepseek_v4, 1.4 TiB free on ~/models volume (>=800 GiB required), antirez remote correctly configured with V4 commits, gguf.MODEL_ARCH.DEEPSEEK4 absent (port needed). Transitioning directly to plan-review.",
+      "verdict": "adopted"
+    },
+    {
+      "at": "2026-05-05T21:05:00Z",
+      "from": "plan-review",
+      "to": "plan-review",
+      "agent": "human",
+      "note": "Cleared in_progress: previous orchestrator backgrounded codex and exited prematurely (codex went orphan PID 25524 PPID=1, killed). Output was not captured \u2014 stdout was attached to dead orchestrator's pipe. Re-dispatching with explicit synchronous-codex instruction."
     }
   ],
   "errors": []
