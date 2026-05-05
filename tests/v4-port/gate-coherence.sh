@@ -20,20 +20,21 @@ LOG_ERR=$(mktemp -t v4-port-gate-coherence-err.XXXXXX)
 trap 'rm -f "$LOG_OUT" "$LOG_ERR"' EXIT
 
 "$LLAMA_BIN/bin/llama-completion" -m "$V4_GGUF" -ngl "$NGL" \
-  -p "The capital of France is" -n 30 --no-warmup --temp 0 \
+  -p "The capital of France is" -n 30 --no-warmup --temp 0 -no-cnv \
   < /dev/null > "$LOG_OUT" 2> "$LOG_ERR" || true
 
-# Combined view for global checks (NaN/Inf scan, displayed tail).
-COMBINED=$(cat "$LOG_OUT" "$LOG_ERR")
-echo "$COMBINED" | tail -5
+# Show a few last lines (use whichever stream — they're separate now).
+# Avoid materializing $(cat "$LOG_OUT" "$LOG_ERR"): bash 3.2's command-
+# substitution buffer chokes on tens-of-MB DeepSeek stderr.
+tail -5 "$LOG_OUT" "$LOG_ERR" 2>/dev/null
 
-if echo "$COMBINED" | grep -qiE "nan|inf"; then
-  # `inf` shows up benignly in things like "info" or build flags; require
-  # an actual NaN/Inf marker pattern (numeric context).
-  if echo "$COMBINED" | grep -qiE '\bnan\b|[-+]?inf[^o]'; then
-    echo "FAIL: NaN/Inf detected"
-    exit 1
-  fi
+# NaN/Inf scan: grep over the temp files directly to avoid command-
+# substitution buffer overflow. `inf` shows up benignly in things like
+# "info" or build flags; require an actual NaN/Inf marker pattern
+# (numeric context).
+if grep -qiE '\bnan\b|[-+]?inf[^o]' "$LOG_OUT" "$LOG_ERR" 2>/dev/null; then
+  echo "FAIL: NaN/Inf detected"
+  exit 1
 fi
 
 # Generated text lives in stdout. llama-completion echoes the prompt prefix
