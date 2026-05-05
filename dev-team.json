@@ -1,0 +1,41 @@
+{
+  "project": "llama.cpp",
+  "default_branch": "deepseek-dsa",
+  "build_commands": [
+    "cmake --build build -j"
+  ],
+  "test_commands": [
+    "tests/v4-port/run-all-gates.sh"
+  ],
+  "smoke_test": [
+    "./build/bin/llama-cli --version"
+  ],
+  "remotes": {
+    "origin": "ggml-org/llama.cpp (upstream — read-only, do not push)",
+    "fairydreaming": "fairydreaming/llama.cpp (PR #21149 source — read-only, do not push)",
+    "antirez": "antirez/llama.cpp-deepseek-v4-flash (V4 source — read-only, do not push)",
+    "mine": "cchuter/llama.cpp (our fork — push freely, including master)"
+  },
+  "push_policy": {
+    "push_to": "mine",
+    "may_merge_to_master": true,
+    "create_pr": false,
+    "reason": "Push to mine (cchuter/llama.cpp) is fine, including merging into mine/master. The line is origin (ggml-org/llama.cpp upstream) — never push there and never `gh pr create` against upstream until explicitly enabled."
+  },
+  "iteration_budget": {
+    "codex_review_rounds": 8,
+    "builder_fix_rounds": 8,
+    "rationale": "Generous iteration budget — encourages persistence on hard problems. Hard cap before needs-human is 8+8."
+  },
+  "env": {
+    "V4_GGUF": "/Users/cchuter/models/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2.gguf"
+  },
+  "notes": [
+    "Goal: port antirez's V4 inference support onto fairydreaming's V3.2/DSA base. Spec: docs/superpowers/specs/2026-05-04-v4-port-overnight-design.md. Plan: docs/superpowers/plans/2026-05-04-v4-port-overnight.md.",
+    "Antirez's 6 V4 commits to port: 06c504247, 188df615c, b67f5db5c, 57c4283b5, 2f2d44052, 3ba61fbb4 — in dependency order.",
+    "Validation gates live in tests/v4-port/. Stream E (validation harness) is built first.",
+    "DSA Metal kernels are PUNTED (V3.2 won't run on Metal in our build — V4 will).",
+    "CUDA is IGNORED tonight. CPU + Metal only.",
+    "Tasks executed in dependency order: E → A → B → C → D → F."
+  ]
+}

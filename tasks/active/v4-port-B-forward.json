@@ -1,0 +1,17 @@
+{
+  "id": "v4-port-B-forward",
+  "title": "V4 long-context fix + validate CPU forward pass",
+  "state": "implementing",
+  "branch": "feat/v4-port",
+  "spec_path": ".claude/agents/v4-port-B-forward.md",
+  "plan_path": "docs/superpowers/plans/2026-05-04-v4-port-overnight.md#task-3",
+  "review_rounds": 0,
+  "fix_attempts": 0,
+  "history": [
+    {"at": "2026-05-05T03:00:00Z", "from": "roadmap", "to": "implementing", "agent": "user", "note": "Plan pre-written; skipping planning + plan-review."}
+  ],
+  "test_report": null,
+  "errors": [],
+  "in_progress": false,
+  "depends_on": ["v4-port-A-loader"]
+}
