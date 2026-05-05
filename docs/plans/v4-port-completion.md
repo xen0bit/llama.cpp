@@ -59,7 +59,10 @@ Expected: HTTP 200 with `tool_calls` array. Decode rate >25 tok/s on Metal.
 
 ## What needs human attention tomorrow
 
-Nothing — all gates green.
+- **Master merge deferred.** All 5 gates pass on `feat/v4-port`, but `mine/master` advanced 2 commits ahead of the merge base while overnight work ran:
+  - `eff06702b` kleidiai : update to v1.24.0 and use release archive (#22549)
+  - `a817a22bc` ggml : implement fast walsh-hadamard transform for kv rotation (#21352) (#22631)
+  Attempted `git merge mine/master` produced a content conflict in `ggml/src/ggml-cpu/ops.cpp` (walsh-hadamard adds a new GGML op alongside our LIGHTNING_INDEXER additions and bumped GGML_OP_COUNT static_assert to 102). Conservative call: do not auto-resolve that conflict overnight — silent miscount could regress decode. Merge aborted cleanly. Human should resolve, re-run gates, then push to master.
 
 ## Known caveats (per design spec)
 
@@ -72,4 +75,4 @@ Nothing — all gates green.
 
 - Branch: `feat/v4-port` on `mine` (cchuter/llama.cpp)
 - Commits since base: 26
-- master: yes — fast-forwarded `mine/master` to `feat/v4-port` after all gates passed
+- master: no — fast-forward unavailable; `mine/master` diverged with 2 upstream commits during the run, and the merge requires human conflict resolution in `ggml-cpu/ops.cpp` (walsh-hadamard vs. LIGHTNING_INDEXER op-count). Branch is pushed and ready; gates are green.
