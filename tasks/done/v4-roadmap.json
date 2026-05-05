@@ -1,12 +1,14 @@
 {
   "id": "v4-roadmap",
   "title": "Audit V3.2/DSA and roadmap V4 (Flash) support",
-  "state": "implementing",
+  "state": "done",
   "branch": "feat/v4-roadmap",
   "spec_path": ".claude/agents/v4-roadmap.md",
   "plan_path": "docs/plans/v4-roadmap.md",
   "review_rounds": 0,
   "fix_attempts": 0,
+  "pr_url": null,
+  "pr_note": "Per dev-team.json push_policy.create_pr=false, NO PR was opened against ggml-org/llama.cpp upstream. Branch was pushed to remote `mine` only: https://github.com/cchuter/llama.cpp/tree/feat/v4-roadmap",
   "history": [
     {
       "at": "2026-05-05T02:24:53Z",
@@ -91,9 +93,29 @@
       "to": "implementing",
       "agent": "orchestrator",
       "note": "AUTO-APPROVED per orchestrator skill rule (review_rounds reached 2 on REVISE). Codex returned multiple REVISE verdicts on minor issues; final 5 rounds of revisions applied substantive fixes (line numbers, real Metal paths, correct symbol names, builder hand-off contract). Total 26 phased tasks across 5 phases. Proceeding to builder phase."
+    },
+    {
+      "at": "2026-05-05T03:00:41Z",
+      "from": "implementing",
+      "to": "code-review",
+      "agent": "builder",
+      "note": "Generated 26 .claude/agents/v4-p*.md specs and 26 tasks/active/v4-p*.json trackers from the roadmap §1d phased table. Created feat/v4-roadmap branch and committed all scaffolding (60bfafbfe). No source code changes — planning artifacts only."
+    },
+    {
+      "at": "2026-05-05T03:02:41Z",
+      "from": "code-review",
+      "to": "testing",
+      "agent": "codex",
+      "note": "APPROVE — all 26 tasks have both spec.md and tracker.json; JSONs are valid and share the schema; ids/branches/spec_paths self-consistent; dev-team.json push_policy documented; no source-code changes."
+    },
+    {
+      "at": "2026-05-05T03:03:17Z",
+      "from": "testing",
+      "to": "done",
+      "agent": "qa",
+      "note": "Build passed: `cmake --build build -j` exit 0 (all targets built incl. llama-cli, llama-server, test-llama-archs). Pushed feat/v4-roadmap to remote `mine` (cchuter/llama.cpp). PR intentionally NOT created per dev-team.json push_policy."
     }
   ],
   "test_report": null,
-  "errors": [],
-  "in_progress": false
+  "errors": []
 }
