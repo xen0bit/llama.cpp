@@ -4,14 +4,15 @@
 Port antirez's working V4 converter from `antirez/main` onto our `feat/v4-port`, the same way Task A-loader ported antirez's V4 runtime. Then run the converter on the cloned base safetensors at `~/models/DeepSeek-V4-Flash/`, quantize to Q4_K_M via `llama-quantize`, and validate against the existing V4 gate suite. Commit the converter changes; **do NOT commit the GGUF artifacts** (they live in `~/models/`, not in git).
 
 ## Plan reference
-**Implementation plan at `docs/superpowers/plans/2026-05-05-v4-port-H-quants.md` — this is v3 of the plan after v1 was REVISE'd twice and v2 was REVISE'd once by codex at high reasoning effort. Follow it exactly.**
+**Implementation plan at `docs/superpowers/plans/2026-05-05-v4-port-H-quants.md` — this is v4. Follow it as your starting point.**
 
-The plan was pre-written and corrected based on codex's findings. Per dev-team convention, the architect should adopt this plan as-is (set state directly to `plan-review` with `plan_path` pointing at the file above) rather than rewriting it. Codex plan-review will catch any remaining issues.
+The plan was pre-written, but **the architect is allowed to revise it** if codex plan-review finds issues. Standard dev-team pipeline: REVISE → architect updates plan → codex re-reviews → APPROVE or escalate after 2 rounds. Use the existing v1/v2/v3 codex history (preserved in the task JSON) as context for what's already been ruled out.
 
 ## What changed across plan versions
-- **v1** attempted to design the V4 converter from scratch. Codex caught 4 fatal defects (missing gguf-py prerequisites, wrong GGUFWriter API, wrong KV key names, wrong HF tensor naming).
-- **v2** replaced design-from-scratch with a wholesale-overlay port of antirez's `convert_hf_to_gguf.py` and `gguf-py/gguf/constants.py`. Codex caught 2 new fatal defects: (a) antirez's diff is non-additive — it `renames` DEEPSEEK32 → DEEPSEEK4 because antirez branched before V3.2/DSA landed; a wholesale `git checkout` would silently delete our V3.2/DSA support; (b) `--outtype f16` is unreachable because V4's FP4 routed experts force `--outtype` ∈ `{iq2_xxs, iq2_xs, q2_k, tq2_0, tq1_0, q8_0}`.
-- **v3** (this plan) does a **surgical** port: read antirez's V4-only code as a reference, manually add it to our files preserving V3.2 entries, verify both archs coexist after each port operation. Conversion uses `--outtype q8_0` (highest-precision allowed); `llama-quantize` then re-quantizes Q8_0 → Q4_K_M.
+- **v1** designed the V4 converter from scratch (REVISE'd twice).
+- **v2** wholesale-overlaid antirez's files (REVISE'd: would delete V3.2; `--outtype f16` unreachable).
+- **v3** surgical V4-additive port + `--outtype q8_0` intermediate (REVISE'd for 3 underspecified pieces of the antirez touch surface).
+- **v4** (this plan) enumerates the full antirez touch surface as explicit Task 3 substeps with line references: imports + `TORCH_FLOAT8_E8M0FNU` (3.A), `LazyTorchTensor` F8_E8M0 dtype maps (3.B), base-class `TextModel.set_gguf_parameters()` `sqrtsoftplus` branch (3.C), argparse `--deepseek4-*` flags (3.D), `ModelBase.__init__` signature (3.E), `ftype_map` iq2_xxs/iq2_xs/q2_k (3.F), `model_class(...)` call-site threading (3.G), `DeepseekV4Model` class (3.H), helper functions (3.I). Task 2 also expanded to include `MODEL_TENSOR.{ATTN_KV, ATTN_OUT_A, ATTN_OUT_B, FFN_GATE_TID2EID}` and `ExpertGatingFuncType.SQRTSOFTPLUS`.
 
 ## Gate (must pass before code-review)
 After conversion + quantization, run:

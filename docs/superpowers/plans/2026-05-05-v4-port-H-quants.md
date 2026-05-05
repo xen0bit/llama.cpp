@@ -1,4 +1,4 @@
-# V4 Q4_K_M Quants Implementation Plan (v3 — surgical antirez port)
+# V4 Q4_K_M Quants Implementation Plan (v4 — surgical antirez port, full touch surface)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.13 (`convert_hf_to_gguf.py`, `gguf-py/gguf/`), llama.cpp C++ (`llama-quantize` already built), bash gates under `tests/v4-port/`.
 
-**Why this is v3:** v1 attempted to design the converter from scratch (REVISE'd by codex twice for missing prerequisites and wrong tensor naming). v2 attempted wholesale `git checkout` of antirez's files (REVISE'd by codex once for two new fatal issues: the diff is non-additive so V3.2 would be silently deleted, AND `--outtype f16` is unreachable because V4's FP4 routed experts force a compact output type). v3 fixes both: surgical V4-only port + q8_0 intermediate.
+**Why this is v4:** v1 designed-from-scratch (REVISE'd ×2). v2 attempted wholesale `git checkout antirez/main -- file` (REVISE'd: would delete V3.2; `--outtype f16` unreachable). v3 was surgical port + q8_0 intermediate but underspecified the antirez touch surface — codex round 1 found 3 more missing pieces: (a) CLI/constructor plumbing not ported (argparse `--deepseek4-*` flags, `ftype_map` entries, `ModelBase.__init__` params, model_class call-site threading), (b) F8_E8M0 dtype support not explicitly listed (`TORCH_FLOAT8_E8M0FNU` constant, `LazyTorchTensor._dtype_str_map`/`_dtype_byteswap_map`), (c) base-class `score_func=='sqrtsoftplus'` branch in `TextModel.set_gguf_parameters()` (cloned config has `scoring_func: "sqrtsoftplus"`) plus missing tensor enums (`ATTN_KV`, `ATTN_OUT_A`, `ATTN_OUT_B`, `FFN_GATE_TID2EID`) and `ExpertGatingFuncType.SQRTSOFTPLUS`. v4 enumerates the full antirez touch surface as explicit substeps with line references.
 
 ---
 
@@ -159,11 +159,16 @@ This produces a "shopping list" of lines to add. Note their structure (enum entr
 For each section antirez touched, add the V4 entry **adjacent to** the existing V3.2 entry. Concrete order:
 
 1. **`MODEL_ARCH` enum** (around line 445): add `DEEPSEEK4 = auto()` immediately after `DEEPSEEK32 = auto()`
-2. **`MODEL_TENSOR` enum** (around line 600+): add V4 tensor enum entries (`ATTN_COMPRESSOR_APE`, `ATTN_COMPRESSOR_KV`, `ATTN_COMPRESSOR_GATE`, `ATTN_COMPRESSOR_NORM`, `INDEXER_COMPRESSOR_*`, `INDEXER_K_NORM`, `INDEXER_PROJ`, `INDEXER_ATTN_K`, `INDEXER_ATTN_Q_B`, `HC_ATTN_BASE/FN/SCALE`, `HC_FFN_BASE/FN/SCALE`, `OUTPUT_HC_BASE/FN/SCALE`)
+2. **`MODEL_TENSOR` enum** (antirez constants.py:656-740): add V4 tensor enum entries:
+   - V4 attention compressors: `ATTN_COMPRESSOR_APE`, `ATTN_COMPRESSOR_KV`, `ATTN_COMPRESSOR_GATE`, `ATTN_COMPRESSOR_NORM`
+   - V4 indexer: `INDEXER_K_NORM`, `INDEXER_PROJ`, `INDEXER_ATTN_K`, `INDEXER_ATTN_Q_B`, `INDEXER_COMPRESSOR_APE/KV/GATE/NORM`
+   - V4 hyper-connection: `HC_ATTN_BASE/FN/SCALE`, `HC_FFN_BASE/FN/SCALE`, `OUTPUT_HC_BASE/FN/SCALE`
+   - **Plus the additional MoE/attention tensors antirez introduced that we currently lack**: `ATTN_KV` (single-tensor KV combined Q/K projection), `ATTN_OUT_A` and `ATTN_OUT_B` (output LoRA pair), `FFN_GATE_TID2EID` (token-id-to-expert-id gating). Verify against `git show antirez/main:gguf-py/gguf/constants.py` to confirm exact names and positions.
 3. **`MODEL_ARCH_NAMES` dict** (around line 932): add `MODEL_ARCH.DEEPSEEK4: "deepseek4"` immediately after the `DEEPSEEK32` entry
 4. **`MODEL_TENSORS` dict** (around line 2821): add `MODEL_ARCH.DEEPSEEK4: [...]` block with all V4 tensors. Copy the structure from antirez's reference file
 5. **`TENSOR_NAMES` dict** (around line 3990): add the V4 mapping block adjacent to V3.2's
 6. **GGUF KV key constants** (search `class Keys`): add V4-specific keys antirez added — `HASH_LAYER_COUNT`, `HYPER_CONNECTION_COUNT/SINKHORN_ITERS/EPS`, `ATTENTION_INDEXER_HEAD_COUNT/KEY_LENGTH/TOP_K`, `ATTENTION_COMPRESS_RATIOS`, `ATTENTION_COMPRESS_ROPE_FREQ_BASE`, `ATTENTION_OUTPUT_LORA_RANK`, `ATTENTION_OUTPUT_GROUP_COUNT`, `NEXTN_PREDICT_LAYERS`. Place adjacent to existing similar constants.
+7. **`ExpertGatingFuncType` enum** (antirez constants.py:4129): add `SQRTSOFTPLUS = 4` (or whatever next-available integer fits the existing enum). The cloned `config.json` has `scoring_func: "sqrtsoftplus"` — this expert gating function is required for the converter to set GGUF parameters correctly. Verify the exact enum value against antirez's source so the runtime decoder agrees.
 
 After each block, save and run a parse check:
 
@@ -254,12 +259,12 @@ git commit -m "v4-port-H: add gguf-py V4 enums, KV constants, writer helpers (V3
 
 ---
 
-## Task 3: Surgical port of antirez's `DeepseekV4Model` class
+## Task 3: Surgical port of antirez's V4 converter touch surface
 
 **Files:**
-- Modify: `convert_hf_to_gguf.py` (add `DeepseekV4Model` adjacent to `DeepseekV32Model`)
+- Modify: `convert_hf_to_gguf.py` (add V4 code adjacent to V3.2; touches multiple parts of the file, not just one class)
 
-**Why:** The actual converter for V4. Must add as a sibling class, not replace V3.2.
+**Why:** The actual converter for V4. The class itself is one piece of a larger antirez touch surface that also includes top-of-file imports, base-class additions (`LazyTorchTensor` dtype maps, `TextModel.set_gguf_parameters` branches, `ModelBase.__init__` params), CLI plumbing (argparse + ftype_map + model_class call site), and helper functions. Each substep below ports one piece; verify all coexist with V3.2.
 
 - [ ] **Step 1: Save antirez's converter for reference**
 
@@ -267,32 +272,118 @@ git commit -m "v4-port-H: add gguf-py V4 enums, KV constants, writer helpers (V3
 git show antirez/main:convert_hf_to_gguf.py > /tmp/v4-antirez-ref/convert_hf_to_gguf.py
 ```
 
-- [ ] **Step 2: Identify the full antirez V4-additive code surface**
+- [ ] **Step 2: Identify the full antirez V4-additive surface**
 
 ```bash
-# DeepseekV4Model class boundaries
-grep -nE "^class DeepseekV4Model|^@ModelBase\.register.*DeepseekV4|^class [A-Z]" /tmp/v4-antirez-ref/convert_hf_to_gguf.py | grep -A1 "DeepseekV4" | head -10
-
-# Top-of-file imports antirez added
-diff <(head -50 convert_hf_to_gguf.py) <(head -50 /tmp/v4-antirez-ref/convert_hf_to_gguf.py) | head -30
-
-# Helper functions/methods antirez added outside DeepseekV4Model (e.g. FP4 dequant infrastructure)
 git diff feat/v4-port..antirez/main -- convert_hf_to_gguf.py | grep -E "^[+]def |^[+]class |^[+]@" | head -30
+git diff feat/v4-port..antirez/main -- convert_hf_to_gguf.py | wc -l
 ```
 
-This produces three lists: (a) class boundaries, (b) new imports to add, (c) helper functions outside the class. The architect should plan around all three categories — antirez's class depends on infrastructure that lives outside it.
+This produces a topology sketch. Use it to verify the substeps below covered everything.
 
-- [ ] **Step 3: Add V4-additive code to our `convert_hf_to_gguf.py`**
+- [ ] **Step 3.A: Top-of-file imports + TORCH_FLOAT8_E8M0FNU constant**
 
-Concrete order:
+Antirez adds (around antirez line 61): `TORCH_FLOAT8_E8M0FNU = getattr(torch, "float8_e8m0fnu", None)`. Plus any extra imports antirez introduced (e.g. `ctypes`).
 
-1. **Imports** (top of file): merge antirez's additions with our existing imports. Common additions: `ctypes`, possibly extra typing/numpy helpers. Do NOT remove imports we already have.
+```python
+# In our file, after `logger = logging.getLogger("hf-to-gguf")`:
+TORCH_FLOAT8_E8M0FNU = getattr(torch, "float8_e8m0fnu", None)
+```
 
-2. **Helper functions / utilities** added by antirez outside `DeepseekV4Model`: read the diff for `+def ` and `+class ` lines outside the class block; add the new helpers preserving any existing function definitions. If a helper has the same name as one we already have, **DO NOT replace** — examine why; either rename antirez's or skip if the existing version works.
+The cloned V4 safetensors use F8_E8M0 for scale tensors; without this constant the loader can't represent the dtype. The `getattr` handles older torch versions gracefully (will be None on torch<2.5; antirez's class then errors usefully if you try to load FP8 weights without modern torch).
 
-3. **`DeepseekV4Model` class** (around our line 9221, immediately after `DeepseekV32Model` closes): paste antirez's class wholesale, preserving the `@ModelBase.register("DeepseekV4ForCausalLM")` decorator. The class includes ~245 lines: `__init__`, `set_vocab`, `set_gguf_parameters`, `modify_tensors`, expert handling (`_write_deepseek4_expert_tensors`, `_qtype_for_ftype`, `_parse_expert_outtype_spec`, `_strip_model_prefix`, `_skip_layer_tensor`), and the FP4 expert decode lookup table.
+- [ ] **Step 3.B: LazyTorchTensor F8_E8M0 dtype map entries**
 
-After the class is added, save and parse-check:
+Antirez adds (around antirez line 13895) entries to `LazyTorchTensor._dtype_str_map` and `_dtype_byteswap_map` for F8_E8M0 / F8_E8M0FNU. Find the corresponding maps in our file (search `_dtype_str_map`) and add:
+
+```python
+# Inside LazyTorchTensor._dtype_str_map (alphabetical/logical placement near other F8_* entries):
+"F8_E8M0":     TORCH_FLOAT8_E8M0FNU,  # treat unconditioned F8_E8M0 as the FNU variant
+"F8_E8M0FNU":  TORCH_FLOAT8_E8M0FNU,
+
+# Inside _dtype_byteswap_map (if antirez added it):
+TORCH_FLOAT8_E8M0FNU: np.uint8,
+```
+
+Cross-check the exact map names and existing F8_E4M3 entries on our `feat/v4-port` so the new entries match style.
+
+- [ ] **Step 3.C: TextModel.set_gguf_parameters() sqrtsoftplus branch (BASE-CLASS CHANGE — careful)**
+
+Antirez adds a branch (around antirez line 1198) to the `score_func` dispatch in `TextModel.set_gguf_parameters()`:
+
+```python
+# Locate the existing `if score_func == "sigmoid": ... elif score_func == "softmax": ...` block
+# in TextModel.set_gguf_parameters() (search `score_func == "sigmoid"`).
+# Add the sqrtsoftplus branch:
+elif score_func == "sqrtsoftplus":
+    self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SQRTSOFTPLUS)
+```
+
+This is a base-class change, NOT a DeepseekV4Model-only change. It affects all models that route through `TextModel.set_gguf_parameters`. Verify the branch placement matches antirez's. The cloned `config.json` has `scoring_func: "sqrtsoftplus"` so the converter will hit this branch on first run — without it, the existing `else: raise ValueError(...)` triggers and conversion aborts.
+
+- [ ] **Step 3.D: argparse `--deepseek4-*` flags**
+
+Antirez adds (antirez line 14057-14068, inside the `parser.add_argument(...)` block at the bottom of `parse_args()`):
+
+```python
+parser.add_argument(
+    "--deepseek4-expert-outtypes", type=str, default=None,
+    help="DeepSeek V4 only: override routed expert quant types, for example 'w1=iq2_xxs,w2=q2_k,w3=iq2_xxs'.",
+)
+parser.add_argument(
+    "--deepseek4-max-layers", type=int, default=None,
+    help="DeepSeek V4 debug only: export only the first N transformer layers.",
+)
+parser.add_argument(
+    "--deepseek4-expert-workers", type=int, default=1,
+    help="DeepSeek V4 only: number of worker threads for routed expert quantization.",
+)
+```
+
+Place these adjacent to other model-specific argparse additions on our branch. Without these, Task 4's smoke-test `--deepseek4-max-layers 2` is unreachable.
+
+- [ ] **Step 3.E: ModelBase.__init__ signature additions**
+
+Antirez extends `ModelBase.__init__` to accept the three deepseek4 args (find via `git diff feat/v4-port..antirez/main -- convert_hf_to_gguf.py | grep -A2 "def __init__"`). Add the kwargs and store them as instance attributes (`self.deepseek4_expert_outtypes`, `self.deepseek4_max_layers`, `self.deepseek4_expert_workers`). The DeepseekV4Model class reads these in its own `__init__`.
+
+- [ ] **Step 3.F: ftype_map entries for iq2_xxs / iq2_xs / q2_k**
+
+Antirez adds entries to the `ftype_map` (search `ftype_map` in the converter; it's the dict that maps `--outtype` strings to `gguf.LlamaFileType.MOSTLY_*` enum values):
+
+```python
+# Add entries adjacent to existing ftype_map entries:
+"iq2_xxs": gguf.LlamaFileType.MOSTLY_IQ2_XXS,
+"iq2_xs":  gguf.LlamaFileType.MOSTLY_IQ2_XS,
+"q2_k":    gguf.LlamaFileType.MOSTLY_Q2_K,
+# (q8_0 is likely already present — preserve it)
+```
+
+These correspond to the `--outtype` values antirez's `_write_deepseek4_expert_tensors` will accept.
+
+- [ ] **Step 3.G: model_class(...) construction call-site**
+
+Antirez extends the `model_class(...)` call (around antirez line 14100, in `main()` after argparse) to thread the three new args:
+
+```python
+model_instance = model_class(
+    # ... existing kwargs ...
+    deepseek4_expert_outtypes=args.deepseek4_expert_outtypes,
+    deepseek4_max_layers=args.deepseek4_max_layers,
+    deepseek4_expert_workers=args.deepseek4_expert_workers,
+)
+```
+
+Find the corresponding call site in our file and add the kwargs.
+
+- [ ] **Step 3.H: DeepseekV4Model class itself**
+
+After the steps above (which provide the class's dependencies), paste antirez's `DeepseekV4Model` class adjacent to `DeepseekV32Model` (~our line 9221). Class includes the `@ModelBase.register("DeepseekV4ForCausalLM")` decorator, ~245 lines covering `__init__`, `set_vocab`, `set_gguf_parameters`, `modify_tensors`, `_write_deepseek4_expert_tensors`, `_qtype_for_ftype`, `_parse_expert_outtype_spec`, `_strip_model_prefix`, `_skip_layer_tensor`, and the FP4 expert decode lookup table (`_fp4_table`).
+
+- [ ] **Step 3.I: Helper functions outside the class**
+
+Re-run `git diff feat/v4-port..antirez/main -- convert_hf_to_gguf.py | grep -E "^[+]def "` and ensure every top-level function antirez added is now present (excluding things that are already in `feat/v4-port` for V3.2 reasons — preserve V3.2 helpers).
+
+After all substeps: parse-check.
 
 ```bash
 python3 -c "import ast; ast.parse(open('convert_hf_to_gguf.py').read()); print('parses')"
