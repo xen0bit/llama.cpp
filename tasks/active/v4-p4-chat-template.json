@@ -1,0 +1,14 @@
+{
+  "id": "v4-p4-chat-template",
+  "title": "Add `LLM_CHAT_TEMPLATE_DEEPSEEK_4`",
+  "state": "roadmap",
+  "branch": "feat/v4-p4-chat-template",
+  "spec_path": ".claude/agents/v4-p4-chat-template.md",
+  "plan_path": null,
+  "review_rounds": 0,
+  "fix_attempts": 0,
+  "history": [],
+  "test_report": null,
+  "errors": [],
+  "in_progress": false
+}

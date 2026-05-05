@@ -1,0 +1,28 @@
+{
+  "project": "llama.cpp",
+  "default_branch": "deepseek-dsa",
+  "build_commands": [
+    "cmake --build build -j"
+  ],
+  "test_commands": [
+    "ctest --test-dir build --output-on-failure -j -L main --timeout 120 || ctest --test-dir build --output-on-failure -j --timeout 120 -R '(test-tokenizer|test-chat|test-model-load)'"
+  ],
+  "smoke_test": [
+    "./build/bin/llama-cli --version"
+  ],
+  "remotes": {
+    "origin": "ggml-org/llama.cpp (upstream — read-only, do not push)",
+    "fairydreaming": "fairydreaming/llama.cpp (PR #21149 source — read-only, do not push)",
+    "mine": "cchuter/llama.cpp (our fork — push feature branches here)"
+  },
+  "push_policy": {
+    "push_to": "mine",
+    "create_pr": false,
+    "reason": "Do not alert llama.cpp upstream maintainers until we are ready. Push feature branches to `mine` for backup/sharing only. No `gh pr create` against ggml-org/llama.cpp until explicitly enabled."
+  },
+  "notes": [
+    "This branch is fairydreaming/deepseek-dsa (PR #21149) — DeepSeek V3.2 + DSA on CPU+CUDA only.",
+    "We are adding Metal kernels for V3.2's sparse attention ops, then DeepSeek V4 (Flash) support on top.",
+    "Fork exists at cchuter/llama.cpp; orchestrator pushes feature branches there but does NOT open PRs upstream."
+  ]
+}

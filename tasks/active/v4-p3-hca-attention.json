@@ -1,0 +1,14 @@
+{
+  "id": "v4-p3-hca-attention",
+  "title": "Heavily Compressed Attention forward path",
+  "state": "roadmap",
+  "branch": "feat/v4-p3-hca-attention",
+  "spec_path": ".claude/agents/v4-p3-hca-attention.md",
+  "plan_path": null,
+  "review_rounds": 0,
+  "fix_attempts": 0,
+  "history": [],
+  "test_report": null,
+  "errors": [],
+  "in_progress": false
+}

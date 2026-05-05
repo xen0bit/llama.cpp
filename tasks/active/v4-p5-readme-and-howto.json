@@ -1,0 +1,14 @@
+{
+  "id": "v4-p5-readme-and-howto",
+  "title": "`docs/deepseek4-howto.md` for users",
+  "state": "roadmap",
+  "branch": "feat/v4-p5-readme-and-howto",
+  "spec_path": ".claude/agents/v4-p5-readme-and-howto.md",
+  "plan_path": null,
+  "review_rounds": 0,
+  "fix_attempts": 0,
+  "history": [],
+  "test_report": null,
+  "errors": [],
+  "in_progress": false
+}

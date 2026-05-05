@@ -1,0 +1,14 @@
+{
+  "id": "v4-p3-quant-pipeline",
+  "title": "End-to-end FP4/FP8 \u2192 GGUF quantization recipe for V4 on M3 Ultra",
+  "state": "roadmap",
+  "branch": "feat/v4-p3-quant-pipeline",
+  "spec_path": ".claude/agents/v4-p3-quant-pipeline.md",
+  "plan_path": null,
+  "review_rounds": 0,
+  "fix_attempts": 0,
+  "history": [],
+  "test_report": null,
+  "errors": [],
+  "in_progress": false
+}

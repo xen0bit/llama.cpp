@@ -1,0 +1,14 @@
+{
+  "id": "v4-p3-hca-cache",
+  "title": "New `llama_kv_cache_v4_hca` for compressed-K/V cache",
+  "state": "roadmap",
+  "branch": "feat/v4-p3-hca-cache",
+  "spec_path": ".claude/agents/v4-p3-hca-cache.md",
+  "plan_path": null,
+  "review_rounds": 0,
+  "fix_attempts": 0,
+  "history": [],
+  "test_report": null,
+  "errors": [],
+  "in_progress": false
+}

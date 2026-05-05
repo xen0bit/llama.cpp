@@ -1,0 +1,14 @@
+{
+  "id": "v4-p3-test-backend-ops",
+  "title": "Add V4 graph blocks to `tests/test-backend-ops.cpp`",
+  "state": "roadmap",
+  "branch": "feat/v4-p3-test-backend-ops",
+  "spec_path": ".claude/agents/v4-p3-test-backend-ops.md",
+  "plan_path": null,
+  "review_rounds": 0,
+  "fix_attempts": 0,
+  "history": [],
+  "test_report": null,
+  "errors": [],
+  "in_progress": false
+}

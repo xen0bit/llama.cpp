@@ -1,0 +1,14 @@
+{
+  "id": "v4-p2-conversion-script",
+  "title": "`DeepseekV4Model` in `convert_hf_to_gguf.py`",
+  "state": "roadmap",
+  "branch": "feat/v4-p2-conversion-script",
+  "spec_path": ".claude/agents/v4-p2-conversion-script.md",
+  "plan_path": null,
+  "review_rounds": 0,
+  "fix_attempts": 0,
+  "history": [],
+  "test_report": null,
+  "errors": [],
+  "in_progress": false
+}

@@ -1,0 +1,14 @@
+{
+  "id": "v4-p1-metal-lightning-indexer",
+  "title": "Implement `GGML_OP_LIGHTNING_INDEXER` on Metal",
+  "state": "roadmap",
+  "branch": "feat/v4-p1-metal-lightning-indexer",
+  "spec_path": ".claude/agents/v4-p1-metal-lightning-indexer.md",
+  "plan_path": null,
+  "review_rounds": 0,
+  "fix_attempts": 0,
+  "history": [],
+  "test_report": null,
+  "errors": [],
+  "in_progress": false
+}

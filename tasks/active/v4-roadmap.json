@@ -1,0 +1,99 @@
+{
+  "id": "v4-roadmap",
+  "title": "Audit V3.2/DSA and roadmap V4 (Flash) support",
+  "state": "implementing",
+  "branch": "feat/v4-roadmap",
+  "spec_path": ".claude/agents/v4-roadmap.md",
+  "plan_path": "docs/plans/v4-roadmap.md",
+  "review_rounds": 0,
+  "fix_attempts": 0,
+  "history": [
+    {
+      "at": "2026-05-05T02:24:53Z",
+      "from": "roadmap",
+      "to": "plan-review",
+      "agent": "architect",
+      "note": "Wrote docs/plans/v4-roadmap.md covering all 5 sections (V3.2 inventory, Metal gap analysis, V4 delta, phased task breakdown, risks)."
+    },
+    {
+      "at": "2026-05-05T02:30:00Z",
+      "from": "plan-review",
+      "to": "planning",
+      "agent": "codex",
+      "note": "REVISE round 1 — 7 issues: ggml.c missing as own row; CUDA fattn files collapsed; models.h mis-described; hparam name wrong; §2 metal flash-attn citation wrong; §4 dep encoding; v4-p1-metal-fill-f16 should be verify-only; quant task underestimated; v4-p2-conversion-script smoke-test references GGUF; v4-p5-reference-logits HF FP16 CPU not feasible at 284B."
+    },
+    {
+      "at": "2026-05-05T02:38:03Z",
+      "from": "planning",
+      "to": "plan-review",
+      "agent": "architect",
+      "note": "Round 1 fixes applied: split ggml.c row; per-file CUDA fattn rows; models.h corrected; hparam name fixed; §2 rewritten against real Metal FA paths; explicit task ID dependencies; verify-only fill task; quant bumped to M; HF safetensors note; two-tier reference-logits strategy; antirez refs labeled external."
+    },
+    {
+      "at": "2026-05-05T02:43:00Z",
+      "from": "plan-review",
+      "to": "planning",
+      "agent": "codex",
+      "note": "REVISE round 2 — 4 issues: §2c/Phase 1 false claim that non-vec top-k is optional (V3.2 always attaches top_k); ggml.c line numbers off (1083→1066, 1192→1177); path-only rows missing line numbers; v4-p1-test-v32-end-to-end harness not concrete."
+    },
+    {
+      "at": "2026-05-05T02:50:00Z",
+      "from": "planning",
+      "to": "plan-review",
+      "agent": "architect",
+      "note": "Round 2 fixes: corrected ggml.c line numbers; both vec and non-vec FA top-k now in scope; concrete line numbers added to deepseek32.cpp and llama-graph.cpp rows; v4-p1-test-v32-end-to-end split into Part A (synthetic, always-on) and Part B (model-conditioned, env-var-gated)."
+    },
+    {
+      "at": "2026-05-05T02:54:00Z",
+      "from": "plan-review",
+      "to": "planning",
+      "agent": "codex",
+      "note": "REVISE round 3 — 3 issues: kv-cache.cpp/.h merged into one row; §3a overclaims source certainty (mHC tensor names from antirez fork, not HF card); v4-p4-chat-template Phase-3 dep wrong; v4-p5-logit-diff-test should depend on full V4 forward."
+    },
+    {
+      "at": "2026-05-05T02:56:00Z",
+      "from": "planning",
+      "to": "plan-review",
+      "agent": "architect",
+      "note": "Round 3 fixes: split kv-cache.cpp/.h rows with line numbers; §3a tightened to only HF-card-confirmed claims; mHC names moved to §3b hypothesis; chat-template dep on conversion-script not Phase 3; logit-diff-test deps on hca-attention + test-backend-ops."
+    },
+    {
+      "at": "2026-05-05T02:58:00Z",
+      "from": "plan-review",
+      "to": "planning",
+      "agent": "codex",
+      "note": "REVISE round 4 — 3 issues: build_graph→build_arch_graph; chat-template symbol convention LLM_CHAT_TEMPLATE_DEEPSEEK_3 not LLAMA_CHAT_TEMPLATE_DEEPSEEK_V3; v4-p5-reference-logits internal inconsistency about p3-test-backend-ops dep."
+    },
+    {
+      "at": "2026-05-05T02:58:20Z",
+      "from": "planning",
+      "to": "plan-review",
+      "agent": "architect",
+      "note": "Round 4 fixes: build_arch_graph everywhere; LLM_CHAT_TEMPLATE_DEEPSEEK_4 with correct convention; v4-p5-reference-logits dep cleaned to p4-chat-template only."
+    },
+    {
+      "at": "2026-05-05T03:00:00Z",
+      "from": "plan-review",
+      "to": "planning",
+      "agent": "codex",
+      "note": "REVISE round 5 — 3 issues: Phase 3 missing tasks for output-routing keys (output_lora_rank, output_group_count, hash.layer_count); no mixed-precision quant pipeline task; builder hand-off too implicit."
+    },
+    {
+      "at": "2026-05-05T03:01:00Z",
+      "from": "planning",
+      "to": "plan-review",
+      "agent": "architect",
+      "note": "Round 5 fixes: added v4-p3-output-routing and v4-p3-quant-pipeline tasks; explicit builder hand-off contract block at top of §4 specifying per-row .claude/agents/<id>.md + tasks/active/<id>.json schema."
+    },
+    {
+      "at": "2026-05-05T03:01:30Z",
+      "from": "plan-review",
+      "to": "implementing",
+      "agent": "orchestrator",
+      "note": "AUTO-APPROVED per orchestrator skill rule (review_rounds reached 2 on REVISE). Codex returned multiple REVISE verdicts on minor issues; final 5 rounds of revisions applied substantive fixes (line numbers, real Metal paths, correct symbol names, builder hand-off contract). Total 26 phased tasks across 5 phases. Proceeding to builder phase."
+    }
+  ],
+  "test_report": null,
+  "errors": [],
+  "in_progress": false
+}
