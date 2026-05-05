@@ -21,19 +21,15 @@ RATIO=$(awk "BEGIN {print ($PRINTABLE / $TOTAL) * 100}")
 echo "Printable ratio: $RATIO%"
 awk "BEGIN { if (($PRINTABLE / $TOTAL) < 0.80) exit 1 }" || { echo "FAIL: <80% printable"; exit 1; }
 
-# Token-count assertion: llama-cli prints a timing summary like
-#   "eval time = ... / N tokens" or "N tokens" in its perf block.
-# We requested -n 30; allow some EOS slack and require N >= 25.
-NTOKENS=$(echo "$OUT" | grep -oE "[0-9]+ runs" -m 1 >/dev/null 2>&1 || true; \
-  echo "$OUT" | grep -oE "/[[:space:]]*[0-9]+[[:space:]]+tokens" | tail -1 | grep -oE "[0-9]+" | head -1)
-if [ -z "${NTOKENS:-}" ]; then
-  # Fallback: look for "N tokens" anywhere in the timing/perf block.
-  NTOKENS=$(echo "$OUT" | grep -oE "[0-9]+ tokens" | tail -1 | awk '{print $1}')
+# Extract decode token count from "eval time = ... / N tokens" line specifically.
+# Anchor on leading whitespace + "eval time" (excludes "prompt eval time" and "total time").
+TOKEN_COUNT=$(echo "$OUT" | grep -E '^[[:space:]]*eval time\s*=' | grep -oE '/ [0-9]+ tokens' | head -1 | awk '{print $2}')
+TOKEN_COUNT=${TOKEN_COUNT:-0}
+echo "Decode tokens: $TOKEN_COUNT"
+if [ "$TOKEN_COUNT" -lt 25 ]; then
+  echo "FAIL: only $TOKEN_COUNT tokens generated (expected >=25)"
+  exit 1
 fi
-if [ -z "${NTOKENS:-}" ] || [ "$NTOKENS" -lt 25 ]; then
-  echo "FAIL: only ${NTOKENS:-0} tokens generated (expected >=25)"; exit 1;
-fi
-echo "Tokens generated: $NTOKENS"
 
 # Word-level repetition check: degenerate decode often loops a single token/word.
 WORDCOUNT=$(echo "$GENONLY" | tr -s ' \n' '\n' | grep -v "^$" | wc -l | tr -d ' ')
