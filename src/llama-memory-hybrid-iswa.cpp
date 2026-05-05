@@ -713,20 +713,24 @@ void llama_memory_hybrid_iswa::dsv4_state_read(llama_io_read_i & io, llama_seq_i
         dsv4_clear_seq(seq_id);
     }
 
-    // scratch buffer for skipping non-matching sequence blocks in targeted-restore mode
+    // scratch buffer for skipping additional blocks in targeted-restore mode
     std::vector<uint8_t> skip_buf;
+
+    // For targeted restore (seq_id != -1) we follow the public API contract
+    // documented at llama.h:836 (llama_state_seq_set_data) and exercised by
+    // examples/save-load-state/save-load-state.cpp: the first encountered
+    // serialized block is REMAPPED into the requested destination seq_id.
+    // Subsequent blocks (atypical multi-seq payloads) are skipped to avoid
+    // silently merging multiple source sequences into one destination.
+    bool restored_one = false;
 
     for (uint32_t is = 0; is < n_seq; ++is) {
         llama_seq_id src_seq_id;
         io.read(&src_seq_id, sizeof(src_seq_id));
 
-        // targeted restore: when caller requested a specific destination seq, only
-        // consume blocks whose src_seq_id matches. Without this guard, every
-        // serialized source sequence would be merged into the destination slot,
-        // silently corrupting state.
-        const bool skip_block = (seq_id != -1 && src_seq_id != seq_id);
+        const bool skip_block = (seq_id != -1 && restored_one);
 
-        const llama_seq_id dst_seq_id = seq_id == -1 ? src_seq_id : seq_id;
+        const llama_seq_id dst_seq_id = (seq_id == -1) ? src_seq_id : seq_id;
         if (!skip_block && (dst_seq_id < 0 || (uint32_t) dst_seq_id >= dsv4_n_seq_max)) {
             throw std::runtime_error("failed to restore DeepSeek V4 compressed KV cache: invalid sequence id");
         }
@@ -773,6 +777,10 @@ void llama_memory_hybrid_iswa::dsv4_state_read(llama_io_read_i & io, llama_seq_i
                     }
                 }
             }
+        }
+
+        if (!skip_block && seq_id != -1) {
+            restored_one = true;
         }
     }
 }
