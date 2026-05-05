@@ -399,7 +399,7 @@ void llama_context::sched_reserve() {
 
     const int64_t t_start_us = ggml_time_us();
 
-    const uint32_t n_seqs = cparams.n_seq_max;
+    const uint32_t n_seqs = model.arch == LLM_ARCH_DEEPSEEK4 ? 1 : cparams.n_seq_max;
     const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
 
     const size_t max_nodes = this->graph_max_nodes(n_tokens);
@@ -2072,6 +2072,9 @@ void llama_context::output_reorder() {
 uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
     if (model.arch == LLM_ARCH_QWEN3NEXT || model.arch == LLM_ARCH_KIMI_LINEAR || model.arch == LLM_ARCH_QWEN35 || model.arch == LLM_ARCH_QWEN35MOE) {
         return std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
+    }
+    if (model.arch == LLM_ARCH_DEEPSEEK4) {
+        return std::max<uint32_t>(4096u, n_tokens * 64 + 32u * model.n_tensors());
     }
     uint32_t res = std::max<uint32_t>(1024u, 8u*model.n_tensors());
     for (const auto & lora : model.loras) {
