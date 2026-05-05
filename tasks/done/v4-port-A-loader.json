@@ -1,0 +1,67 @@
+{
+  "id": "v4-port-A-loader",
+  "title": "Cherry-pick V4 inference support (loader + forward pass)",
+  "state": "done",
+  "branch": "feat/v4-port",
+  "spec_path": ".claude/agents/v4-port-A-loader.md",
+  "plan_path": "docs/superpowers/plans/2026-05-04-v4-port-overnight.md#task-2",
+  "review_rounds": 2,
+  "fix_attempts": 1,
+  "history": [
+    {
+      "at": "2026-05-05T03:00:00Z",
+      "from": "roadmap",
+      "to": "implementing",
+      "agent": "user",
+      "note": "Plan pre-written; skipping planning + plan-review."
+    },
+    {
+      "at": "2026-05-05T03:50:23Z",
+      "from": "implementing",
+      "to": "implementing",
+      "agent": "orchestrator",
+      "note": "dispatching builder for cherry-pick of 06c504247"
+    },
+    {
+      "at": "2026-05-05T04:03:18Z",
+      "from": "implementing",
+      "to": "implementing",
+      "agent": "builder",
+      "note": "BLOCKED on cherry-pick approach; orchestrator reframing as structural port (fix_attempt 1)"
+    },
+    {
+      "at": "2026-05-05T05:47:26Z",
+      "from": "code-review",
+      "to": "implementing",
+      "agent": "codex",
+      "note": "REVISE r1 \u2014 2 HIGH correctness issues (inherited from antirez source)"
+    },
+    {
+      "at": "2026-05-05T05:52:47Z",
+      "from": "code-review",
+      "to": "implementing",
+      "agent": "codex",
+      "note": "REVISE r2 \u2014 1 issue (incomplete fix on r1 issue 2)"
+    },
+    {
+      "at": "2026-05-05T05:55:16Z",
+      "from": "code-review",
+      "to": "testing",
+      "agent": "codex",
+      "note": "APPROVED r3 (after r1+r2 hardening of inherited bugs)"
+    },
+    {
+      "at": "2026-05-05T05:55:16Z",
+      "from": "testing",
+      "to": "done",
+      "agent": "orchestrator",
+      "note": "gate-loader PASS: loader recognizes V4 GGUF (4 commits: 7b92aebf4 + f596cd332 + 4c93d29b4 + c837644a3)"
+    }
+  ],
+  "test_report": "gate-loader.sh: exit 0 / PASS: loader recognizes V4 GGUF",
+  "errors": [],
+  "in_progress": false,
+  "depends_on": [
+    "v4-port-E-validate"
+  ]
+}
