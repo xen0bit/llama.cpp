@@ -8,7 +8,7 @@
   "plan_path": "docs/superpowers/plans/2026-05-05-v4-port-G-kv-q8.md",
   "review_rounds": 0,
   "fix_attempts": 0,
-  "in_progress": true,
+  "in_progress": false,
   "history": [
     {
       "at": "2026-05-06T20:45:00Z",
@@ -66,6 +66,13 @@
       "agent": "user",
       "note": "Plan APPROVE'd at round 2 (auto). Orchestrator escalated only because its harness lacks Agent tool. Parent session takes over per orchestrator brief; dispatching builder subagent for Tasks 1-8 in worktree off feat/v4-port at a67e97c3a, with V4_GGUF=$HOME/models/DeepSeek-V4-Flash-Q4_K_M.gguf. Builder must heed round-2 codex guidance from errors[]: bail-mode gate needs background-start-with-timeout if Phase 3 picks bail; Tasks 4/5/7 conditional on Phase 1/2 diagnosis.",
       "verdict": "parent-takes-over"
+    },
+    {
+      "at": "2026-05-05T22:00:00Z",
+      "from": "implementing",
+      "to": "implementing",
+      "agent": "builder",
+      "note": "Round-1 fix: moved V4 fp16 KV-cache coercion from src/llama-model.cpp::create_memory() to src/llama-context.cpp::llama_init_from_model() (after the existing LLM_ARCH_GROK override, before the SPLIT_MODE_TENSOR/V-quant/FA shared validations and before the constructor's flash_attn check). The earlier site coerces user-facing params.type_k/type_v so the shared validators see effective fp16 for V4 and no longer reject --cache-type-v q8_0 with --flash-attn off or under SPLIT_MODE_TENSOR. WARN fires once at the new site; the model.cpp coercion is kept (without WARN) as a defense-in-depth safety net for direct create_memory callers. Added MODE=warn-fa-off regression mode to tests/v4-port/gate-server-chat-q8.sh (--cache-type-k f16 --cache-type-v q8_0 --flash-attn off) wired into run-all-gates.sh; passes alongside the existing warn mode and the rest of the suite (gate-loader, gate-coherence NGL=999, gate-speed, gate-tools, gate-server-chat). Pre-existing NGL=0 baseline failure on Q4_K_M reproduces and is documented as out-of-scope in the completion doc."
     }
   ],
   "errors": [

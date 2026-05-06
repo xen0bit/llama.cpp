@@ -7,16 +7,36 @@ Follow-up to `docs/plans/v4-port-debug-completion.md`. Closes the deferred
 
 For DeepSeek4 (V4) models, the KV cache type is now pinned to
 `GGML_TYPE_F16` regardless of the user's `--cache-type-k|v` flags. The
-override is applied at the V4 case in `src/llama-model.cpp` where the
-`llama_memory_hybrid_iswa` is constructed: both `params.type_k` and
-`params.type_v` are replaced with `GGML_TYPE_F16` before construction, and a
-single `LLAMA_LOG_WARN` is emitted on first allocation if the user
-requested anything other than fp16. The model now produces coherent output
-even when invoked with `--cache-type-k q8_0 --cache-type-v q8_0`.
+override is applied early in `llama_init_from_model`
+(`src/llama-context.cpp`), immediately after the existing Grok flash-attn
+override and **before** any of the shared cache-type validations
+(SPLIT_MODE_TENSOR + KV-quant rejection at `:3047-3050`,
+flash-attn + V-cache-quant block-size checks at `:3053-3073`,
+"V cache quantization requires flash_attn" at `:3075-3078`, and the
+constructor's "quantized V cache requires Flash Attention" at `:351-355`).
+A single `LLAMA_LOG_WARN` ("DeepSeek4: forcing fp16 KV cache ...") is
+emitted at the early site if the user requested anything other than fp16.
 
-A new gate `tests/v4-port/gate-server-chat-q8.sh` enforces this in `warn`
-mode (asserts coherent output AND the WARN line in server stderr); wired
-into `tests/v4-port/run-all-gates.sh`.
+The original coercion in `src/llama-model.cpp::create_memory()` is kept as
+a defense-in-depth safety net (without the WARN, since it now fires once
+at the earlier site) for any direct callers of `create_memory` that might
+bypass `llama_init_from_model`.
+
+The model now produces coherent output even when invoked with
+`--cache-type-k q8_0 --cache-type-v q8_0`, AND -- per codex round-1 finding
+-- requests like `--cache-type-k f16 --cache-type-v q8_0 --flash-attn off`
+or under `SPLIT_MODE_TENSOR` no longer trip the shared validators with
+misleading FA / quantization-not-implemented errors.
+
+Two `tests/v4-port/gate-server-chat-q8.sh` modes enforce this:
+* `MODE=warn` (default) -- `--cache-type-k|v q8_0 --flash-attn on` boots
+  coherent and emits the WARN line.
+* `MODE=warn-fa-off` -- `--cache-type-k f16 --cache-type-v q8_0
+  --flash-attn off` boots coherent, emits the WARN line, and does NOT
+  trigger the "V cache quantization requires flash_attn" diagnostic. This
+  is the codex round-1 regression check.
+
+Both are wired into `tests/v4-port/run-all-gates.sh`.
 
 ## Bisection (Phase 1 of the design spec)
 
@@ -89,41 +109,86 @@ Block alignment (`QK8_0 == 32`) is not the issue: typical V4 head dimensions
 
 ## Fix landed (Phase 3 — chosen path)
 
-**Location:** `src/llama-model.cpp`, case `LLM_ARCH_DEEPSEEK4` in
-`llama_model::create_memory()` (around line 1989).
+**Primary location:** `src/llama-context.cpp`, in `llama_init_from_model()`
+right after the existing `LLM_ARCH_GROK` flash-attn override (around line
+3038, just before the `SPLIT_MODE_TENSOR` block).
 
-**Change:** before constructing `llama_memory_hybrid_iswa`, override
-`params.type_k` and `params.type_v` to `GGML_TYPE_F16`, log a single
-`LLAMA_LOG_WARN` if the user requested anything else.
+**Change:** detect `model->arch == LLM_ARCH_DEEPSEEK4` immediately after
+the model is loaded, coerce `params.type_k` and `params.type_v` to
+`GGML_TYPE_F16`, and emit a single `LLAMA_LOG_WARN` if the user requested
+anything else. The coercion runs **before** any of the shared cache-type
+validations (`:3047-3050`, `:3053-3073`, `:3075-3078`, `:351-355`), so
+those validators see the effective fp16 types for V4 and accept the
+request.
 
 ```cpp
-// V4's standard SWA K cache, compressed-attention K cache (cache.attn_k),
-// and indexer K cache (cache.index_k) all share the same `type_k` and
-// must agree in dtype because src/models/deepseek4.cpp concatenates the
-// SWA K view with the compressed K view via ggml_concat (which asserts
-// a->type == b->type). Furthermore, V4's K activations are post-fp8-
-// quantized (ggml_dsv4_fp8_kv_quantize), and q8_0's single fp16 scale
-// per 32-element block cannot faithfully reproduce fp8-quantized value
-// distributions -- pinning to q8_0 corrupts decode silently ("=" loops,
-// "Mirror ..." garbage). Force fp16 unconditionally for V4 KV caches and
-// log once if the user requested anything different.
-ggml_type v4_type_k = GGML_TYPE_F16;
-ggml_type v4_type_v = GGML_TYPE_F16;
-if (params.type_k != v4_type_k || params.type_v != v4_type_v) {
-    LLAMA_LOG_WARN("DeepSeek4: forcing fp16 KV cache (--cache-type-k|v are ignored for V4 because compressed/indexer K caches require fp16; "
-                   "see docs/plans/v4-port-kv-q8-completion.md)\n");
+// V4 (DeepSeek4) requires fp16 KV cache: V4's standard SWA K cache,
+// compressed-attention K cache (cache.attn_k), and indexer K cache
+// (cache.index_k) all share the same `type_k` and must agree in dtype
+// because src/models/deepseek4.cpp concatenates the SWA K view with the
+// compressed K view via ggml_concat (which asserts a->type == b->type).
+// Furthermore, V4's K activations are post-fp8-quantized
+// (ggml_dsv4_fp8_kv_quantize), and q8_0's single fp16 scale per 32-element
+// block cannot faithfully reproduce fp8-quantized value distributions --
+// pinning to q8_0 corrupts decode silently ("=" loops, "Mirror ..."
+// garbage). Coerce here, before the SPLIT_MODE_TENSOR / FA / V-quant
+// shared validations below and before the constructor's flash_attn check,
+// so those validations see the effective fp16 types and won't reject V4
+// requests with --cache-type-k|v q8_0.
+if (model->arch == LLM_ARCH_DEEPSEEK4) {
+    if (params.type_k != GGML_TYPE_F16 || params.type_v != GGML_TYPE_F16) {
+        LLAMA_LOG_WARN("DeepSeek4: forcing fp16 KV cache (--cache-type-k|v are ignored for V4 because compressed/indexer K caches require fp16; "
+                       "see docs/plans/v4-port-kv-q8-completion.md)\n");
+        params.type_k = GGML_TYPE_F16;
+        params.type_v = GGML_TYPE_F16;
+    }
 }
 ```
 
+**Why this location, not `create_memory()`?** Per codex round-1 review,
+the prior placement in `src/llama-model.cpp::create_memory()` only coerced
+the values *passed into* `llama_memory_hybrid_iswa`; it did **not**
+normalize the user-facing `params.type_k`/`type_v` that the rest of the
+shared context init still reads. As a result, V4 still behaved as
+"quantized KV requested" in:
+
+* `src/llama-context.cpp:351-353` — constructor: with `--flash-attn off`
+  and a quantized `type_v`, the request was rejected with
+  *"quantized V cache was requested, but this requires Flash Attention"*
+  even though V4 would have pinned to fp16.
+* `src/llama-context.cpp:3047-3050` — `SPLIT_MODE_TENSOR` + KV
+  quantization combination was rejected with
+  *"simultaneous use of SPLIT_MODE_TENSOR and KV cache quantization not
+  implemented"*.
+* `src/llama-context.cpp:3075-3078` — analogous V-cache + no-FA rejection.
+
+Moving the coercion into `llama_init_from_model` ensures those shared
+validations operate on the effective fp16 types for V4, so the
+"--cache-type-k|v are ignored for V4" behaviour is propagated cleanly
+to both `llama-completion` and `llama-server`.
+
+**Defense-in-depth:** the original coercion in
+`src/llama-model.cpp::create_memory()` is kept as a safety net (the local
+`v4_type_k` / `v4_type_v` are still pinned to fp16 inside the
+`LLM_ARCH_DEEPSEEK4` case before the `llama_memory_hybrid_iswa`
+constructor). The duplicate WARN there has been removed because it now
+fires once at the earlier site. This protects any direct caller of
+`create_memory` that bypasses `llama_init_from_model`.
+
 This is the *correct* fix, not a workaround:
 
-- A single arch-guarded point (case `LLM_ARCH_DEEPSEEK4`) covers all three
-  V4 K caches because the `type_k` argument flows through
-  `llama_memory_hybrid_iswa` to `mem_attn` (the standard SWA cache) AND is
-  re-used inside the V4-specific allocation loop for `attn_k` / `index_k`.
+- A single arch-guarded point covers all three V4 K caches because the
+  `type_k` argument flows through `llama_memory_hybrid_iswa` to `mem_attn`
+  (the standard SWA cache) AND is re-used inside the V4-specific
+  allocation loop for `attn_k` / `index_k`.
 - Both `llama-server` and `llama-completion` invoke `llama_init_from_model`
   → `llama_context` → the memory factory → this code path, so a single
   point covers both binaries (per the spec's bail-guard placement note).
+- The coercion now runs **before** the shared validators, so
+  `--cache-type-k f16 --cache-type-v q8_0 --flash-attn off` (and
+  `SPLIT_MODE_TENSOR` with a quantized cache type request) on V4 are
+  accepted with a WARN instead of being rejected with misleading error
+  messages.
 - No changes to `llama_memory_hybrid_iswa` internals, no kernel changes, no
   scattered checks per cache.
 
@@ -158,12 +223,25 @@ OK[tools-q8]: 1 tool_call(s)
 PASS: server-chat-q8 (warn; coherent + override WARN observed)
 
 $ V4_GGUF=$HOME/models/DeepSeek-V4-Flash-Q4_K_M.gguf \
+    MODE=warn-fa-off ./tests/v4-port/gate-server-chat-q8.sh
+OK[tiny-no-tools-q8]: 45 tokens, 164 chars, 35 unique
+OK[medium-no-tools-q8]: 13 tokens, 58 chars, 26 unique
+OK[tools-q8]: 1 tool_call(s)
+PASS: server-chat-q8 (warn-fa-off; coherent + override WARN + no shared-validator rejection)
+
+$ V4_GGUF=$HOME/models/DeepSeek-V4-Flash-Q4_K_M.gguf \
     ./tests/v4-port/gate-server-chat.sh
 OK[tiny-no-tools]: 45 tokens, 164 chars, 35 unique
 OK[medium-no-tools]: 13 tokens, 56 chars, 26 unique
 OK[tools]: 1 tool_call(s)
 PASS: server-chat (3/3 tests coherent)
 ```
+
+The `warn-fa-off` mode is the codex round-1 regression check: it asserts
+the V4 coercion runs **before** the shared "V cache quantization requires
+flash_attn" validator, so `--cache-type-v q8_0 --flash-attn off` is
+accepted (server boots, WARN fires, decode is coherent) instead of being
+rejected.
 
 `gate-loader.sh`, `gate-tools.sh`, `gate-speed.sh`, and
 `gate-coherence.sh NGL=999` also pass against this branch.
