@@ -1,14 +1,14 @@
 {
   "id": "v4-port-G-kv-q8",
   "title": "Fix V4 silent corruption under --cache-type-k|v q8_0",
-  "state": "implementing",
+  "state": "done",
   "branch": "feat/v4-port-G-kv-q8",
   "parent_branch": "feat/v4-port",
   "spec_path": ".claude/agents/v4-port-G-kv-q8.md",
   "plan_path": "docs/superpowers/plans/2026-05-05-v4-port-G-kv-q8.md",
   "review_rounds": 1,
   "fix_attempts": 1,
-  "in_progress": true,
+  "in_progress": false,
   "history": [
     {
       "at": "2026-05-06T20:45:00Z",
@@ -124,10 +124,24 @@
       "verdict": "REVISE",
       "review_round": 1,
       "note": "Round 1 codex code-review (high reasoning, sandbox=read-only, stdin pipe to /tmp/v4-G-code-review.log). REVISE with 1 substantive issue: fix at src/llama-model.cpp:1989-2012 only coerces the types passed to llama_memory_hybrid_iswa; doesn't normalize user-facing params.type_k/type_v that downstream shared validations in src/llama-context.cpp:351-353 (FA-required-for-q8-V) and 3047-3077 (SPLIT_MODE_TENSOR rejection) still read. Result: --cache-type-k f16 --cache-type-v q8_0 with --no-flash-attn still bails before our override; tensor-split mode + q8 KV still rejected. Coercion needs to happen BEFORE those shared validations, OR validations need to use effective V4 dtypes. Gate parts (EXPECTED_WARN, MODE=warn coherence+WARN check, MODE=bail bg-start) all OK."
+    },
+    {
+      "at": "2026-05-06T22:30:00Z",
+      "from": "code-review",
+      "to": "code-review",
+      "agent": "codex",
+      "verdict": "APPROVE",
+      "review_round": 2,
+      "note": "Round 2 codex code-review (high reasoning, sandbox=read-only, stdin pipe to /tmp/v4-G-code-review-r2.log). APPROVE. Quote: 'The round-2 diff fixes the round-1 issue cleanly. params.type_k/type_v are now coerced in llama_init_from_model() before the shared SPLIT/FA/V-quant checks and before the same by-value params copy is passed into new llama_context(*model, params), so the constructor's quantized V cache rejection also sees F16. The remaining create_memory() pin is harmless defense-in-depth, with no duplicate WARN. The gate's EXPECTED_WARN still matches the runtime string, and MODE=warn-fa-off directly exercises the original --cache-type-k f16 --cache-type-v q8_0 --flash-attn off failure mode while asserting both shared FA diagnostics stay absent. The new completion doc accurately describes the layered fix.'"
+    },
+    {
+      "at": "2026-05-06T22:35:00Z",
+      "from": "code-review",
+      "to": "done",
+      "agent": "user",
+      "verdict": "done",
+      "note": "Task complete. Codex plan-review APPROVE'd round 2 (auto, after 2 REVISE rounds during plan stage). Codex code-review APPROVE'd round 2 (after 1 REVISE \u2192 builder fix \u2192 re-review). Final SHA on feat/v4-port-G-kv-q8: 914ae6a4a. Branch ready for merge into feat/v4-port. All gates pass against Q4_K_M (excluding pre-existing NGL=0 baseline that reproduces on parent HEAD before G's commits, documented as out-of-scope). New gate-server-chat-q8.sh + MODE=warn-fa-off variant wired into run-all-gates.sh."
     }
   ],
-  "errors": [
-    "Round-2 codex guidance for builder (non-blocking): (1) MODE=bail path of gate-server-chat-q8.sh as currently written runs llama-server in foreground and waits for process exit \u2014 if server boots successfully, gate hangs. If you choose the bail-guard Phase-3 path, rewrite MODE=bail to start the server in the background, wait ~30s, then deterministically FAIL if /health responds OR the process is still alive; PASS only on non-zero early exit with expected diagnostic. (2) Tasks 4/5/7 in the plan are written assuming the realistic-case fp16-pin-with-WARN outcome. If Phase 1/2 diagnosis instead points to the kernel-fix (ok mode) or shared-layer bail-guard (bail mode), adapt Tasks 4-7 accordingly: change MODE default in gate-server-chat-q8.sh to match, change the completion doc to describe the actually-landed fix, and change the file modified.",
-    "Round-1 codex: type_k/type_v override at src/llama-model.cpp:1989 is too late. Downstream shared validations in src/llama-context.cpp (lines 351-353 and 3047-3077) read the un-overridden values and can still error out for V4 with --cache-type-k f16 --cache-type-v q8_0 (FA-required-for-q8-V) or SPLIT_MODE_TENSOR + q8. Fix: move the V4 fp16 coercion earlier (before llama_context's shared validation runs) OR teach those validations to use effective V4 dtypes."
-  ]
+  "errors": []
 }
