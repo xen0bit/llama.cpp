@@ -16,7 +16,7 @@ PORT="${PORT:-8090}"
 #   ok       (default) -- server boots and produces coherent output
 #   bail     -- server exits non-zero at startup with diagnostic substring
 #   warn     -- same as ok, plus log must contain the override WARN line
-MODE="${MODE:-ok}"
+MODE="${MODE:-warn}"
 EXPECTED_DIAG="${EXPECTED_DIAG:-DeepSeek4 KV cache requires fp16}"
 EXPECTED_WARN="${EXPECTED_WARN:-DeepSeek4: forcing fp16 KV cache}"
 
