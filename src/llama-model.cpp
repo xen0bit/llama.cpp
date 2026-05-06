@@ -1996,15 +1996,19 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                 // single fp16 scale per 32-element block cannot faithfully
                 // reproduce fp8-quantized value distributions -- pinning to
                 // q8_0 corrupts decode silently ("=" loops, "Mirror ..."
-                // garbage). Force fp16 unconditionally for V4 KV caches and
-                // log once if the user requested anything different. See
+                // garbage). Force fp16 unconditionally for V4 KV caches.
+                //
+                // NOTE: the user-facing WARN and the params.type_k/type_v
+                // coercion already happen earlier in llama_init_from_model
+                // (src/llama-context.cpp), BEFORE the shared
+                // SPLIT_MODE_TENSOR / V-quant-requires-FA validations run,
+                // so users requesting q8_0 KV with V4 don't trip those
+                // checks. The fp16 pin here is a defense-in-depth safety
+                // net for any direct callers of create_memory() that
+                // bypass llama_init_from_model. See
                 // docs/plans/v4-port-kv-q8-completion.md.
                 ggml_type v4_type_k = GGML_TYPE_F16;
                 ggml_type v4_type_v = GGML_TYPE_F16;
-                if (params.type_k != v4_type_k || params.type_v != v4_type_v) {
-                    LLAMA_LOG_WARN("DeepSeek4: forcing fp16 KV cache (--cache-type-k|v are ignored for V4 because compressed/indexer K caches require fp16; "
-                                   "see docs/plans/v4-port-kv-q8-completion.md)\n");
-                }
 
                 res = new llama_memory_hybrid_iswa(
                         /* model             */ *this,
