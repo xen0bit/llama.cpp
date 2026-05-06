@@ -16,6 +16,12 @@ PORT="${PORT:-8090}"
 #   ok       (default) -- server boots and produces coherent output
 #   bail     -- server exits non-zero at startup with diagnostic substring
 #   warn     -- same as ok, plus log must contain the override WARN line
+#   warn-fa-off -- regression test for codex round-1 finding: with
+#                  --flash-attn off and a quantized V cache, the V4
+#                  coercion must run BEFORE the shared "quantized V cache
+#                  requires Flash Attention" validation -- otherwise the
+#                  server rejects the request even though V4 will pin to
+#                  fp16. Same assertions as warn (coherent + WARN line).
 MODE="${MODE:-warn}"
 EXPECTED_DIAG="${EXPECTED_DIAG:-DeepSeek4 KV cache requires fp16}"
 EXPECTED_WARN="${EXPECTED_WARN:-DeepSeek4: forcing fp16 KV cache}"
@@ -23,14 +29,29 @@ EXPECTED_WARN="${EXPECTED_WARN:-DeepSeek4: forcing fp16 KV cache}"
 TMP="$(mktemp -d -t v4-port-gate-server-chat-q8.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
-cmd=(
-  "$LLAMA_BIN/bin/llama-server"
-  -m "$V4_GGUF" --jinja --reasoning-budget 0
-  --port "$PORT" --ctx-size 32768 -ngl 999 --parallel 1 --flash-attn on
-  --threads-batch 32
-  --cache-type-k q8_0 --cache-type-v q8_0
-  --temp 0.7 --top-p 0.95 --top-k 40 --min-p 0.05
-)
+if [ "$MODE" = "warn-fa-off" ]; then
+  # Codex round-1 regression: --flash-attn off with a quantized V cache must
+  # NOT trip the shared "V cache requires Flash Attention" validator on V4.
+  # The early V4 coercion in llama_init_from_model coerces type_v to fp16
+  # before that check runs, so the server should boot.
+  cmd=(
+    "$LLAMA_BIN/bin/llama-server"
+    -m "$V4_GGUF" --jinja --reasoning-budget 0
+    --port "$PORT" --ctx-size 32768 -ngl 999 --parallel 1 --flash-attn off
+    --threads-batch 32
+    --cache-type-k f16 --cache-type-v q8_0
+    --temp 0.7 --top-p 0.95 --top-k 40 --min-p 0.05
+  )
+else
+  cmd=(
+    "$LLAMA_BIN/bin/llama-server"
+    -m "$V4_GGUF" --jinja --reasoning-budget 0
+    --port "$PORT" --ctx-size 32768 -ngl 999 --parallel 1 --flash-attn on
+    --threads-batch 32
+    --cache-type-k q8_0 --cache-type-v q8_0
+    --temp 0.7 --top-p 0.95 --top-k 40 --min-p 0.05
+  )
+fi
 
 if [ "$MODE" = "bail" ]; then
   # Per codex round-2 guidance: do NOT run server in foreground waiting for
@@ -154,6 +175,25 @@ if [ "$MODE" = "warn" ]; then
     exit 1
   fi
   echo "PASS: server-chat-q8 (warn; coherent + override WARN observed)"
+  exit 0
+fi
+
+if [ "$MODE" = "warn-fa-off" ]; then
+  if ! grep -q "$EXPECTED_WARN" "$TMP/server.log"; then
+    echo "FAIL[warn-fa-off]: WARN '$EXPECTED_WARN' not found in server log"
+    tail -40 "$TMP/server.log"
+    exit 1
+  fi
+  # Sanity: the shared "V cache quantization requires flash_attn" diagnostic
+  # must NOT fire -- if it does, V4 coercion ran too late and rejected the
+  # request before pinning to fp16.
+  if grep -q "V cache quantization requires flash_attn" "$TMP/server.log" || \
+     grep -q "quantized V cache was requested, but this requires Flash Attention" "$TMP/server.log"; then
+    echo "FAIL[warn-fa-off]: shared V-quant-requires-FA validator fired (V4 coercion ran too late)"
+    tail -40 "$TMP/server.log"
+    exit 1
+  fi
+  echo "PASS: server-chat-q8 (warn-fa-off; coherent + override WARN + no shared-validator rejection)"
   exit 0
 fi
 
