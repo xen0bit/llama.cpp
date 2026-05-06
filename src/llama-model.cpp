@@ -1986,10 +1986,30 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     return hparams.attn_compress_ratio[il] != 0;
                 };
 
+                // V4's standard SWA K cache, compressed-attention K cache
+                // (cache.attn_k), and indexer K cache (cache.index_k) all
+                // share the same `type_k` and must agree in dtype because
+                // src/models/deepseek4.cpp concatenates the SWA K view with
+                // the compressed K view via ggml_concat (which asserts
+                // a->type == b->type). Furthermore, V4's K activations are
+                // post-fp8-quantized (ggml_dsv4_fp8_kv_quantize), and q8_0's
+                // single fp16 scale per 32-element block cannot faithfully
+                // reproduce fp8-quantized value distributions -- pinning to
+                // q8_0 corrupts decode silently ("=" loops, "Mirror ..."
+                // garbage). Force fp16 unconditionally for V4 KV caches and
+                // log once if the user requested anything different. See
+                // docs/plans/v4-port-kv-q8-completion.md.
+                ggml_type v4_type_k = GGML_TYPE_F16;
+                ggml_type v4_type_v = GGML_TYPE_F16;
+                if (params.type_k != v4_type_k || params.type_v != v4_type_v) {
+                    LLAMA_LOG_WARN("DeepSeek4: forcing fp16 KV cache (--cache-type-k|v are ignored for V4 because compressed/indexer K caches require fp16; "
+                                   "see docs/plans/v4-port-kv-q8-completion.md)\n");
+                }
+
                 res = new llama_memory_hybrid_iswa(
                         /* model             */ *this,
-                        /* attn_type_k       */ params.type_k,
-                        /* attn_type_v       */ params.type_v,
+                        /* attn_type_k       */ v4_type_k,
+                        /* attn_type_v       */ v4_type_v,
                         /* attn_v_trans      */ !cparams.flash_attn,
                         /* attn_swa_full     */ params.swa_full,
                         /* attn_kv_size      */ cparams.n_ctx_seq,
