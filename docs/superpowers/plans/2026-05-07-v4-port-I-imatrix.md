@@ -330,7 +330,7 @@ ROOT="$(cd "$DIR/../.." && pwd)"
 
 V4_GGUF="${V4_GGUF:-$HOME/models/DeepSeek-V4-Flash-Q8_0.gguf}"
 BIN="${LLAMA_IMATRIX_BIN:-$ROOT/build/bin/llama-imatrix}"
-SAMPLE="$DIR/calibration/tiny-sample.txt"
+SAMPLE="$DIR/calibration/wikitext-tiny.txt"
 OUT=$(mktemp -t imatrix-gate.XXXXXX.dat)
 
 if [ ! -f "$V4_GGUF" ]; then

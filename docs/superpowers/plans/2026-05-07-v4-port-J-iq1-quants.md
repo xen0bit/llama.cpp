@@ -31,7 +31,12 @@ Expected: file exists, size ~few MB. If missing, Task I has not been merged yet 
 export V4_GGUF=$HOME/models/DeepSeek-V4-Flash-Q8_0.gguf
 ls -la "$V4_GGUF"   # ~282 GiB
 
-# Build llama-quantize and llama-gguf-split if not already built
+# Configure release build/ if fresh worktree (idempotent)
+if [ ! -f build/CMakeCache.txt ]; then
+    cmake -B build -DCMAKE_BUILD_TYPE=Release
+fi
+
+# Build llama-quantize and llama-gguf-split
 cmake --build build --target llama-quantize llama-gguf-split -j
 ```
 
