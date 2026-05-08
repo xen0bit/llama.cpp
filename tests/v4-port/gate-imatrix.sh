@@ -47,16 +47,44 @@ if [ ! -s "$OUT" ]; then
     exit 1
 fi
 
-# Minimum tensor count check. V4 has 43 layers x 5 attention + 3 expert
-# = 8 tensor classes. At chunks=2 we expect coverage to be partial but
-# not minimal: at least 100 distinct tensor entries indicates the fix
-# isn't accidentally skipping whole tensor classes. The full per-class
-# coverage check (~344 expected) lives in the Task 5 production run.
-TENSOR_COUNT=$(strings "$OUT" | grep -cE '^blk\.[0-9]+\.' || true)
-MIN_TENSORS=100
-if [ "$TENSOR_COUNT" -lt "$MIN_TENSORS" ]; then
-    echo "FAIL: imatrix output has only $TENSOR_COUNT tensors, expected >= $MIN_TENSORS"
-    exit 1
-fi
+# Per-class coverage check. V4 has 43 layers; each weight tensor class
+# (5 attention projections + 3 expert MoE matrices = 8 classes) should
+# appear in most layers even at chunks=2. An aggregate count alone
+# could pass a degraded fix that skips an entire class (e.g. all
+# attention or all expert tensors) as long as enough names from other
+# classes remain — the check below catches that by requiring each
+# of the 8 classes to appear in at least PER_CLASS_MIN distinct layers.
+#
+# Threshold rationale: at chunks=2 (the wikitext-tiny.txt calibration
+# the gate uses) we don't expect every layer to fire on every class,
+# but the fix should produce broad enough coverage that each class
+# appears in at least 25 of 43 layers. The exhaustive Task 5 check
+# (1000 chunks, threshold 38/43 per class) lives in the plan; this
+# gate is the cheaper smoke test that still catches whole-class drops.
+python3 - "$OUT" <<'PYEOF'
+import re, sys
+content = open(sys.argv[1], 'rb').read()
+unique = sorted({b.decode() for b in re.findall(rb'blk\.\d+\.[a-z_.]+', content)})
 
-echo "PASS: gate-imatrix ($TENSOR_COUNT tensors collected)"
+ATTN_CLASSES = ['attn_q_a', 'attn_q_b', 'attn_kv', 'attn_output_a', 'attn_output_b']
+EXPERT_CLASSES = ['ffn_gate_exps', 'ffn_up_exps', 'ffn_down_exps']
+PER_CLASS_MIN = 25
+
+def count_class(cls):
+    return sum(1 for t in unique if f'.{cls}.' in t or t.endswith(f'.{cls}'))
+
+print(f'Per-class coverage (V4 has 43 layers; threshold >= {PER_CLASS_MIN} each):')
+fail = False
+for cls in ATTN_CLASSES + EXPERT_CLASSES:
+    n = count_class(cls)
+    status = 'PASS' if n >= PER_CLASS_MIN else 'FAIL'
+    if n < PER_CLASS_MIN:
+        fail = True
+    print(f'  {cls:25s} {n:3d}  {status}')
+
+if fail:
+    print('FAIL: at least one tensor class has insufficient layer coverage.')
+    print('      The imatrix fix is skipping tensors that should be calibrated.')
+    sys.exit(1)
+print(f'PASS: gate-imatrix ({len(unique)} unique tensor names, all 8 classes >= {PER_CLASS_MIN} layers)')
+PYEOF
