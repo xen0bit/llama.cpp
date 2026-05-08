@@ -20,11 +20,18 @@ git fetch mine
 git worktree add ../llama.cpp.J-iq1 -b feat/v4-port-J-iq1-quants mine/feat/v4-port
 cd ../llama.cpp.J-iq1
 
-# Verify Task I's calibration data is present (this is the only hard prerequisite)
-ls -la tests/v4-port/calibration/imatrix-v4-flash.dat
+# Seed the calibration .dat from the Task I worktree.
+# It's .gitignored (binary, machine-local) so git does NOT carry it across worktrees
+# even when Task I has been merged. Copy from wherever Task I produced it.
+mkdir -p tests/v4-port/calibration
+cp ../llama.cpp.I-imatrix/tests/v4-port/calibration/imatrix-v4-flash.dat \
+   tests/v4-port/calibration/imatrix-v4-flash.dat
+
+# Verify it's present and non-trivial
+ls -lh tests/v4-port/calibration/imatrix-v4-flash.dat
 ```
 
-Expected: file exists, size ~few MB. If missing, Task I has not been merged yet and this task cannot proceed.
+Expected: file exists, size in the hundreds of MB (V4 is wide MoE — 43 layers × 256 experts × multiple projections — so the .dat is much larger than the few-MB stats files typical of V3). If the cp source is missing, fall back: re-run Task I's calibration step locally before proceeding (re-using the existing fixed `llama-imatrix` binary), or pull from `teamblobfish/DeepSeek-V4-Flash-GGUF/imatrix/imatrix-v4-flash.dat` if Task J has already published a working build at least once.
 
 ```bash
 # Verify Q8 source is on disk (re-quantize input)
@@ -372,11 +379,14 @@ df -h "$HOME/models" | head -2
 
 ---
 
-### Task 7: Upload both quants to Hugging Face
+### Task 7: Upload quants and imatrix to Hugging Face
 
 **Files (remote):**
 - `teamblobfish/DeepSeek-V4-Flash-GGUF/IQ1_S/*.gguf`
 - `teamblobfish/DeepSeek-V4-Flash-GGUF/IQ1_M/*.gguf`
+- `teamblobfish/DeepSeek-V4-Flash-GGUF/imatrix/imatrix-v4-flash.dat`
+
+**Precondition — validation gate (NON-NEGOTIABLE):** Tasks 2 (IQ1_S validation) and 4 (IQ1_M validation) must have completed. Each quant gets uploaded ONLY if its own validation passed (or it was rebuilt at the Q6_K fallback per the spec and that build's validation passed). The imatrix .dat is uploaded if at least one of IQ1_S or IQ1_M passed and is being uploaded — without a working quant, the imatrix has no public utility. If BOTH quants fail outright, abort the entire task (no quant upload, no imatrix upload, no README update); document the failure mode in the task JSON `errors` and stop. Failed validation means re-do, not publish-and-fix.
 
 The HF token must be available via the `HF_TOKEN` env var. The reference recipe and gotchas are documented at `~/work/blobfish/docs/hf-quant-uploads.md`.
 
@@ -410,7 +420,29 @@ HF_TOKEN="$HF_TOKEN" hf upload \
   --commit-message "Add IQ1_M shards (imatrix-calibrated, ~60 GiB)"
 ```
 
-- [ ] **Step 4: Verify upload via API**
+- [ ] **Step 4: Upload the imatrix calibration data (skip if both quants unviable)**
+
+The imatrix .dat (~470 MB) is what Task I produced. Uploading it lets anyone re-run the V4 IQ1 build from the Q8 source GGUF without redoing the 30–60 min calibration on their own machine. It's only useful in conjunction with the IQ1 quants, so this step is gated on at least one of Steps 2 or 3 above having uploaded a quant successfully.
+
+The .dat is .gitignored and lives at `tests/v4-port/calibration/imatrix-v4-flash.dat` in this worktree. Confirm it exists and is non-empty before upload:
+
+```bash
+ls -lh tests/v4-port/calibration/imatrix-v4-flash.dat
+# Must exist and be > 100 MB. If missing, the worktree wasn't seeded
+# from Task I — copy from the producing worktree (I-imatrix) before retry.
+```
+
+```bash
+HF_TOKEN="$HF_TOKEN" hf upload \
+  teamblobfish/DeepSeek-V4-Flash-GGUF \
+  tests/v4-port/calibration/imatrix-v4-flash.dat \
+  imatrix/imatrix-v4-flash.dat \
+  --commit-message "Add wikitext-103 imatrix calibration (1000 chunks, V4 Flash)"
+```
+
+Expected: progress lines, `url=...` line. Imatrix appears at `https://huggingface.co/teamblobfish/DeepSeek-V4-Flash-GGUF/blob/main/imatrix/imatrix-v4-flash.dat`.
+
+- [ ] **Step 5: Verify upload via API**
 
 ```bash
 HF_TOKEN="$HF_TOKEN" uv run --with huggingface_hub python3 -c "
@@ -418,15 +450,15 @@ from huggingface_hub import HfApi
 info = HfApi().repo_info('teamblobfish/DeepSeek-V4-Flash-GGUF', repo_type='model', files_metadata=True)
 total = 0
 for f in sorted(info.siblings, key=lambda s: s.rfilename):
-    if f.rfilename.startswith(('IQ1_S/', 'IQ1_M/')):
+    if f.rfilename.startswith(('IQ1_S/', 'IQ1_M/', 'imatrix/')):
         sz = f.size or 0
         total += sz
         print(f'  {f.rfilename:60s}  {sz/1024**3:7.2f} GiB')
-print(f'IQ1 total: {total/1024**3:.2f} GiB')
+print(f'IQ1 + imatrix total: {total/1024**3:.2f} GiB')
 "
 ```
 
-Expected: lists the new files; total IQ1 size matches local.
+Expected: lists the new files (IQ1_S/, IQ1_M/, and imatrix/imatrix-v4-flash.dat); total size matches local.
 
 ---
 
@@ -467,8 +499,12 @@ Find the "Provenance" section. Add a sentence about the imatrix corpus:
 
 ```markdown
 IQ1_S and IQ1_M quants additionally use an imatrix calibration produced from the
-`wikitext-103-raw-v1` test split (1000 chunks, ~1M tokens). The calibration .dat
-is regenerated locally per the v4-port-I task; it is not committed to the fork.
+`wikitext-103-raw-v1` test split (1000 chunks, ~1M tokens). The calibration is
+published alongside the quants at
+[`imatrix/imatrix-v4-flash.dat`](https://huggingface.co/teamblobfish/DeepSeek-V4-Flash-GGUF/blob/main/imatrix/imatrix-v4-flash.dat)
+so that downstream IQ-quant builds from the Q8_0 source can be reproduced
+without re-running the 30–60 min calibration. It is not committed to the fork
+(local-machine-only working artifact).
 ```
 
 - [ ] **Step 4: Upload the updated README**
