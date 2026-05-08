@@ -58,6 +58,20 @@
       "to": "implementing",
       "agent": "orchestrator",
       "note": "Resuming after machine crash. Task 1 (ASan debug build) already done at commit a6f3579cb in /Users/cchuter/work/llama.cpp.I-imatrix worktree. Dispatching builder for Tasks 2-6 (diagnose -> patch -> regression gate -> 1000-chunk calibration -> coverage verify -> push). Builder pushes branch then stops; orchestrator runs codex code-review next."
+    },
+    {
+      "at": "2026-05-08T02:30:00Z",
+      "from": "implementing",
+      "to": "implementing",
+      "agent": "builder",
+      "note": "Tasks 2-3 complete on first dispatch: 388165628 (diagnosis), c42b7e5cf (fix - Strategy 4+2: kv_unified + early op-class skip; deviation from plan's 1/2/3, must be explained at code-review). Task 4 commit 91c12024e (gate-imatrix.sh + run-all-gates wiring). Task 5 calibration interrupted at chunk 272/1000 (~27%) when orchestrator stopped this dispatch."
+    },
+    {
+      "at": "2026-05-08T02:32:00Z",
+      "from": "implementing",
+      "to": "implementing",
+      "agent": "orchestrator",
+      "note": "Stopped builder mid-calibration: plan's Task 5 step 4 instructed `git add imatrix-v4-flash.dat` which violates the project rule that binary artifacts are never committed. Plan revised on feat/v4-port-I-imatrix at ec896e9e8 (.dat now .gitignored, Task 5 commits only the .gitignore update). Partial .dat (470 MB) deleted from worktree. Re-dispatching builder for Task 5 (clean restart of calibration) + Task 6 (push)."
     }
   ],
   "errors": [
