@@ -94,34 +94,64 @@ Shape mismatch (with imatrix defaults `n_ctx=512, n_batch=2048`):
 
 ## Fix strategy chosen
 
-**Strategy 4 (NEW): force `kv_unified = true` in `tools/imatrix/imatrix.cpp::main()`.**
+**Combined patch: Strategy 4 (kv_unified) + Strategy 2 (op-class early skip).**
 
-Rationale: the V4 graph builder at `deepseek4.cpp:1162` is correct under the
-contract that `n_stream == 1` (which already holds for the rest of llama.cpp's
-V4 callers — see the unconditional `n_seqs = 1` for `LLM_ARCH_DEEPSEEK4` at
+The crash actually has **two distinct root causes**, only the first of which
+shows up in the initial reproducer (because the second only fires after the
+first is fixed and graph execution actually starts):
+
+### Bug A — graph reserve (this writeup's primary backtrace)
+
+The V4 graph builder at `deepseek4.cpp:1162` is correct under the contract that
+`n_stream == 1` (which already holds for the rest of llama.cpp's V4 callers —
+see the unconditional `n_seqs = 1` for `LLM_ARCH_DEEPSEEK4` at
 `src/llama-context.cpp:402`). The bug is that imatrix raises `n_seq_max` to
 keep its multi-chunk batching strategy (`n_parallel = n_batch / n_ctx`) but
 never sets `kv_unified`, so it accidentally ends up with `n_stream = 4` for a
 graph that hard-codes `n_stream = 1`.
 
-`kv_unified = true` makes the KV cache use a single shared buffer regardless of
-`n_seq_max`, which both:
-1. Restores the `n_stream == 1` invariant the V4 graph builder requires.
-2. Preserves imatrix's multi-chunk batching throughput (n_parallel still 4 →
-   ubatch parallelism for collection still works; only the KV layout changes).
+**Fix A:** force `params.kv_unified = true` in `tools/imatrix/imatrix.cpp::main()`.
+This makes the KV cache use a single shared buffer regardless of `n_seq_max`,
+which (1) restores the `n_stream == 1` invariant and (2) preserves imatrix's
+multi-chunk ubatch parallelism (n_parallel stays 4, only KV layout changes).
+Benign for non-V4 archs.
 
-The patch is a single line in `imatrix.cpp::main()`:
+### Bug B — collector callback null-deref (uncovered after Bug A is fixed)
 
-```cpp
-// V4's compressed-attention graph (src/models/deepseek4.cpp:1162) hard-codes
-// n_stream == 1 for the SWA KV reshape; without this the multi-chunk
-// batching strategy (n_parallel = n_batch / n_ctx) crashes graph_reserve.
-// kv_unified=true is benign for non-V4 archs (single shared KV buffer).
-params.kv_unified = true;
-```
+After Bug A is patched and graph execution starts, the imatrix collector
+hits a SEGV at `tools/imatrix/imatrix.cpp:234` (`filter_tensor_name(src0->name)`)
+because the `cb_eval` callback fires for **every** scheduled graph node and the
+collector unconditionally dereferences `t->src[0]` before checking the op type.
+On V4, V4-specific ops (`LIGHTNING_INDEXER`, `DSV4_HC_*`,
+`DSV4_FP8_KV_QUANTIZE`, `DSV4_ROPE_TAIL`) and ordinary leaf nodes
+(`GGML_OP_NONE`, `GGML_OP_VIEW` constants, etc.) reach this path.
 
-Smallest patch satisfying spec: 4 lines (1 line of code + 3 lines of comment).
-No collector logic changes; activation coverage is unaffected.
+The ASan trace (after Bug A is fixed) shows the offending pointer is `0x100`,
+which equals the offset of the `name` field within a zero-initialized
+`ggml_tensor`, i.e. `(char*)nullptr->name`. So `t->src[0]` is null for at
+least one node V4 schedules.
+
+**Fix B:** move the op-class filter (Strategy 2 from the plan) to the very
+start of `collect_imatrix`, **before** the `src0->name` dereference. Reject
+anything that isn't `GGML_OP_MUL_MAT` or `GGML_OP_MUL_MAT_ID`. This was already
+the existing intent of the function (see lines 241-242 of the original
+implementation), but it ran AFTER the unconditional name extraction. Moving
+it first eliminates the null deref without changing collection semantics:
+the activation collector only ever cares about MUL_MAT / MUL_MAT_ID nodes
+anyway.
+
+### Combined patch
+
+Two small hunks (≈25 lines total including comments):
+
+1. `imatrix.cpp::main()` — set `params.kv_unified = true` after the
+   `n_parallel` override block.
+2. `imatrix.cpp::IMatrixCollector::collect_imatrix` — move the op-class
+   guard to the top of the function, ahead of `src0->name`.
+
+No semantic change to collection coverage on non-V4 archs (the new early
+filter is the same set already enforced one branch deeper) and no semantic
+change to `kv_unified`'s effect on tools that pre-existed our fork.
 
 ## Strategies rejected
 
