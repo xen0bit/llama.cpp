@@ -539,30 +539,37 @@ EOF
 
 Expected: PASS for all 8 classes. If any class fails, the fix is too aggressive — it's skipping a tensor class that the calibration needs. Re-evaluate Task 3.
 
-- [ ] **Step 4: Add the calibration data file to git (it's small)**
+- [ ] **Step 4: Verify the artifact exists on disk (NOT committed)**
+
+The .dat file is a binary calibration artifact. It is **never committed to git** — the V4 quant pipeline is local-machine-bound (the V4 GGUF source is also not in git), and Task J reads the .dat directly from this on-disk path on the same machine. If it ever needs to outlive this machine, upload to HF as a release asset, do not commit.
 
 ```bash
 ls -lh tests/v4-port/calibration/imatrix-v4-flash.dat
-# verify size: should be a few MB, not gigabytes
-git add tests/v4-port/calibration/imatrix-v4-flash.dat
+# Sanity check that it exists and is non-trivial.
+# Size will be much larger than typical V3 imatrix (~few MB) because
+# V4 has 43 layers × 256 experts × multiple projections — hundreds of
+# MB is plausible. The size sanity is "non-empty"; the real quality
+# check is per-class tensor coverage in Step 3 above.
 ```
 
-- [ ] **Step 5: Add wikitext source to .gitignore (large, transient)**
+- [ ] **Step 5: Add calibration outputs and source data to .gitignore**
 
 ```bash
 cat >> .gitignore <<'EOF'
 
-# imatrix calibration source data (large, regenerable)
+# imatrix calibration data (binary, regenerable, machine-local)
+tests/v4-port/calibration/imatrix-v4-flash.dat
 tests/v4-port/calibration/wikitext/
 tests/v4-port/calibration/wikitext.txt
 EOF
 git add .gitignore
 ```
 
-- [ ] **Step 6: Commit the calibration data**
+- [ ] **Step 6: Commit the .gitignore update**
 
 ```bash
-git commit -m "v4-port-I: produce imatrix-v4-flash.dat from wikitext-103 (1000 chunks)"
+git status   # confirm only .gitignore is staged; no .dat or wikitext blobs
+git commit -m "v4-port-I: gitignore imatrix calibration outputs (binary, machine-local)"
 ```
 
 ---
@@ -606,7 +613,7 @@ git push mine feat/v4-port-I-imatrix
 - [ ] `docs/plans/v4-port-imatrix-diagnosis.md` written, names exact crash site + chosen strategy + rejected alternatives
 - [ ] `tests/v4-port/gate-imatrix.sh` created, executable, passes locally
 - [ ] `tests/v4-port/run-all-gates.sh` includes the new gate, full suite passes
-- [ ] `tests/v4-port/calibration/imatrix-v4-flash.dat` exists and committed (≥200 attention + ≥100 expert tensors covered)
+- [ ] `tests/v4-port/calibration/imatrix-v4-flash.dat` exists on disk and is .gitignored (≥200 attention + ≥100 expert tensors covered) — the file is binary, machine-local, and consumed by Task J on the same machine; never commit it to git
 - [ ] Branch `feat/v4-port-I-imatrix` pushed to `mine`
 - [ ] Codex plan-review and code-review both APPROVE (per dev-team workflow)
 

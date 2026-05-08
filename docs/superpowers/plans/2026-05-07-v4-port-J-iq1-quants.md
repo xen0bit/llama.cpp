@@ -467,8 +467,8 @@ Find the "Provenance" section. Add a sentence about the imatrix corpus:
 
 ```markdown
 IQ1_S and IQ1_M quants additionally use an imatrix calibration produced from the
-`wikitext-103-raw-v1` test split (1000 chunks, ~1M tokens). Calibration data is
-checked into the fork at `tests/v4-port/calibration/imatrix-v4-flash.dat`.
+`wikitext-103-raw-v1` test split (1000 chunks, ~1M tokens). The calibration .dat
+is regenerated locally per the v4-port-I task; it is not committed to the fork.
 ```
 
 - [ ] **Step 4: Upload the updated README**
