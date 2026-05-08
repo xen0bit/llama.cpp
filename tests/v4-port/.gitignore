@@ -1,5 +1,7 @@
 # Track calibration scripts and committed artifacts; ignore large
-# transient source data downloaded by Task 5.
+# transient source data downloaded by Task 5 and binary calibration
+# outputs produced by llama-imatrix (regenerable, machine-local).
 !calibration/
 calibration/wikitext/
 calibration/wikitext.txt
+calibration/imatrix-v4-flash.dat
