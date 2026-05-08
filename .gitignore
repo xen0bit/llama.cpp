@@ -28,6 +28,9 @@
 /.ccls-cache/
 /.direnv/
 /.envrc
+
+# Claude Code metadata (local-only: task specs, skills, etc.)
+/.claude/
 /.idea/
 /.swiftpm
 /.vs/
