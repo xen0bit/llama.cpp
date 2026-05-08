@@ -34,13 +34,22 @@ fi
 
 trap 'rm -f "$OUT"' EXIT
 
+# --no-repack: defensively disabled here for the same reason it's
+# disabled in gate-coherence.sh — when V4's Q8 layers spill CPU-side
+# (full GPU offload but VRAM tight, or test machines without GPU),
+# the loader allocates CPU_Mapped + CPU_REPACK and the source mmap
+# is not released, doubling resident memory and OOM-killing the
+# process on a 512 GB host. With -ngl 999 + sufficient GPU VRAM
+# the flag is a no-op; on machines that fall back to CPU layers
+# it's the difference between PASS and SIGKILL.
 echo "Running llama-imatrix against V4 (chunks=2)..."
 "$BIN" \
     -m "$V4_GGUF" \
     -f "$SAMPLE" \
     -o "$OUT" \
     --chunks 2 \
-    -ngl 999
+    -ngl 999 \
+    --no-repack
 
 if [ ! -s "$OUT" ]; then
     echo "FAIL: imatrix output file missing or empty: $OUT"
@@ -64,27 +73,37 @@ fi
 python3 - "$OUT" <<'PYEOF'
 import re, sys
 content = open(sys.argv[1], 'rb').read()
-unique = sorted({b.decode() for b in re.findall(rb'blk\.\d+\.[a-z_.]+', content)})
+# Capture (layer, class) pairs so we can count DISTINCT layers per class.
+# A naive set of tensor-name strings would conflate e.g. "attn_q_b" with
+# "attn_q_b.weight" / "attn_q_b.bias" (multiple tensor names per layer)
+# and inflate the count well past the 43-layer ceiling.
+pairs = set()
+for m in re.finditer(rb'blk\.(\d+)\.([a-z_.]+)', content):
+    layer = int(m.group(1))
+    rest = m.group(2).decode()
+    pairs.add((layer, rest))
 
 ATTN_CLASSES = ['attn_q_a', 'attn_q_b', 'attn_kv', 'attn_output_a', 'attn_output_b']
 EXPERT_CLASSES = ['ffn_gate_exps', 'ffn_up_exps', 'ffn_down_exps']
-PER_CLASS_MIN = 25
+PER_CLASS_MIN = 25  # of 43 layers
 
-def count_class(cls):
-    return sum(1 for t in unique if f'.{cls}.' in t or t.endswith(f'.{cls}'))
+def layers_for_class(cls):
+    return {layer for (layer, rest) in pairs
+            if rest == cls or rest.startswith(f'{cls}.')}
 
-print(f'Per-class coverage (V4 has 43 layers; threshold >= {PER_CLASS_MIN} each):')
+print(f'Per-class layer coverage (V4 has 43 layers; threshold >= {PER_CLASS_MIN}):')
 fail = False
 for cls in ATTN_CLASSES + EXPERT_CLASSES:
-    n = count_class(cls)
+    layers = layers_for_class(cls)
+    n = len(layers)
     status = 'PASS' if n >= PER_CLASS_MIN else 'FAIL'
     if n < PER_CLASS_MIN:
         fail = True
-    print(f'  {cls:25s} {n:3d}  {status}')
+    print(f'  {cls:25s} {n:3d} layers  {status}')
 
 if fail:
     print('FAIL: at least one tensor class has insufficient layer coverage.')
     print('      The imatrix fix is skipping tensors that should be calibrated.')
     sys.exit(1)
-print(f'PASS: gate-imatrix ({len(unique)} unique tensor names, all 8 classes >= {PER_CLASS_MIN} layers)')
+print(f'PASS: gate-imatrix ({len(pairs)} distinct (layer, tensor) pairs, all 8 classes >= {PER_CLASS_MIN} layers)')
 PYEOF
