@@ -1,14 +1,14 @@
 {
   "id": "v4-port-J-iq1-quants",
   "title": "Build IQ1_S and IQ1_M quants for DeepSeek V4 Flash",
-  "state": "roadmap",
+  "state": "implementing",
   "branch": "feat/v4-port-J-iq1-quants",
   "parent_branch": "feat/v4-port",
   "spec_path": ".claude/agents/v4-port-J-iq1-quants.md",
   "plan_path": "docs/superpowers/plans/2026-05-07-v4-port-J-iq1-quants.md",
   "review_rounds": 0,
   "fix_attempts": 0,
-  "in_progress": false,
+  "in_progress": true,
   "depends_on": ["v4-port-I-imatrix"],
   "history": [
     {
@@ -17,6 +17,13 @@
       "to": "roadmap",
       "agent": "user",
       "note": "Created. Hard prerequisite: v4-port-I-imatrix must be merged to feat/v4-port first (consumes tests/v4-port/calibration/imatrix-v4-flash.dat). Spec at docs/superpowers/specs/2026-05-07-v4-imatrix-iq1-design.md. Plan at docs/superpowers/plans/2026-05-07-v4-port-J-iq1-quants.md. Phased plan: build IQ1_S (Q5_K output/embed pin, IQ1_S body) → validate via gate-loader/coherence/tools → build IQ1_M same recipe → validate → split shards → upload to teamblobfish/DeepSeek-V4-Flash-GGUF under IQ1_S/ and IQ1_M/ subdirs → update HF README. Fallback: if gate-tools fails at Q5_K pin, bump to Q6_K and rebuild; if still fails, declare unviable and ship as research artifact."
+    },
+    {
+      "at": "2026-05-08T04:30:00Z",
+      "from": "roadmap",
+      "to": "implementing",
+      "agent": "orchestrator",
+      "note": "Task I done and merged at 19b63dc36; depends_on satisfied. Skipping standalone plan-review: Plan J was reviewed alongside Plan I in Task I's codex round 1+2 (architect-revised at ec896e9e8, HF upload integration at a20be8ed5, both reviewed in the Task I diff). Worktree set up at /Users/cchuter/work/llama.cpp.J-iq1 from feat/v4-port. .dat copied from I-imatrix worktree (449 MB). Build configured + llama-quantize and llama-gguf-split built. Beginning IQ1_S quantize."
     }
   ],
   "errors": []
