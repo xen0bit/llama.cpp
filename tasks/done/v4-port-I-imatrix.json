@@ -1,7 +1,7 @@
 {
   "id": "v4-port-I-imatrix",
   "title": "Fix V4 imatrix segfault and produce calibration data",
-  "state": "code-review",
+  "state": "done",
   "branch": "feat/v4-port-I-imatrix",
   "parent_branch": "feat/v4-port",
   "spec_path": ".claude/agents/v4-port-I-imatrix.md",
@@ -93,6 +93,41 @@
       "to": "code-review",
       "agent": "orchestrator",
       "note": "Full gate suite PASS: ALL GATES PASS in 3:27 wall (loader, coherence x2, speed, tools, server-chat, server-chat-q8 x2, imatrix). Branch feat/v4-port-I-imatrix pushed to mine at 303f68d55. Ready for codex code-review. Reviewer should evaluate: (a) the 'Strategy 4 + 2' deviation in the imatrix.cpp fix (commit c42b7e5cf — kv_unified + early op-class skip; plan documented strategies 1/2/3 only, builder invented this hybrid); (b) the .gitignore landing in tests/v4-port/.gitignore vs the plan's root .gitignore (commit d56165ade); (c) the gate-coherence prompt change + --no-repack (commit 303f68d55) is a workaround for unrelated upstream issues, not a Task I deliverable — flag if reviewer thinks this scope creep should be split."
+    },
+    {
+      "at": "2026-05-08T04:05:00Z",
+      "from": "code-review",
+      "to": "code-review",
+      "agent": "codex",
+      "note": "Round 1 verdict: REVISE (2 IMPORTANT). (1) gate-imatrix.sh aggregate strings count could pass degraded output skipping a whole class. (2) tasks/active/v4-port-I-imatrix.json on this branch regressed parent's code-review state and history. Imatrix.cpp fix, .gitignore location, gate-coherence workaround all APPROVED."
+    },
+    {
+      "at": "2026-05-08T04:10:00Z",
+      "from": "code-review",
+      "to": "code-review",
+      "agent": "orchestrator",
+      "note": "Round 1 fixes: (1) commit 8986219ac replaced aggregate count with per-class python check requiring each of 8 classes (5 attn + 3 expert) at >=25/43 layers. (2) Merged feat/v4-port into branch (merge commit f52e487db); conflict on JSON resolved by taking parent's full history. Also pulled in unrelated cleanup 60ae3723c (.claude/ untrack)."
+    },
+    {
+      "at": "2026-05-08T04:17:00Z",
+      "from": "code-review",
+      "to": "code-review",
+      "agent": "codex",
+      "note": "Round 2 verdict: REVISE (2 IMPORTANT). (1) gate-imatrix.sh count_class() counted unique tensor NAMES not distinct LAYERS — threshold 25/43 layers was meaningless because each class has multiple names per layer. (2) gate-imatrix.sh missing --no-repack while gate-coherence.sh has it for the same V4 OOM reason. All other items remained APPROVED."
+    },
+    {
+      "at": "2026-05-08T04:22:00Z",
+      "from": "code-review",
+      "to": "testing",
+      "agent": "orchestrator",
+      "note": "Round 2 fixes applied at commit 5840eb5c0: (1) parse blk.<layer>.<rest> into (layer, rest) pairs and count len({layer for ... if matches class}) per class. (2) added --no-repack alongside -ngl 999 in gate-imatrix.sh. Standalone test PASS, all 8 classes 43/43 layers, 1493 distinct (layer, tensor) pairs. Per HARD RULE 6 (review_rounds >= 2 on REVISE -> auto-approve to testing) — fixes were direct codex recommendations so round 3 would be redundant. Auto-approving."
+    },
+    {
+      "at": "2026-05-08T04:25:00Z",
+      "from": "testing",
+      "to": "done",
+      "agent": "orchestrator",
+      "note": "Full gate suite re-run on final HEAD 5840eb5c0: ALL GATES PASS in 3:26 wall (loader, coherence x2, speed, tools, server-chat, server-chat-q8 x2, imatrix). Merging feat/v4-port-I-imatrix into feat/v4-port (--no-ff) and moving task JSON to tasks/done/."
     }
   ],
   "errors": [
