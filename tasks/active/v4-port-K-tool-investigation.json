@@ -1,0 +1,23 @@
+{
+  "id": "v4-port-K-tool-investigation",
+  "title": "Investigate why V4 sub-Q8 quants fail gate-tools while Q8_0 passes",
+  "state": "roadmap",
+  "branch": "feat/v4-port-K-tool-investigation",
+  "parent_branch": "feat/v4-port",
+  "spec_path": null,
+  "plan_path": null,
+  "review_rounds": 0,
+  "fix_attempts": 0,
+  "in_progress": false,
+  "depends_on": [],
+  "history": [
+    {
+      "at": "2026-05-08T22:50:00Z",
+      "from": null,
+      "to": "roadmap",
+      "agent": "user",
+      "note": "Created. Surfaced during Task J quant matrix: every V4 quant smaller than Q8_0 (Q4_K_M-XL, Q2_K-XL, IQ2_XS-XL, IQ2_XXS-XL, IQ1_S-XL, IQ1_M-XL, IQ1_M) fails the V4 fork's gate-tools regression test, while Q8_0 passes. Two observations point at this NOT being a quant-quality issue: (1) Q4_K_M-XL (4.92 BPW) and Q2_K-XL (3.01 BPW) fail the same way despite a 1.6 BPW body-precision gap — adding bits doesn't fix it; (2) Q2_K-XL writes valid Python code that calls a real weather API in response to the tool prompt, suggesting the model understands the task but emits the wrong output format.\n\nHypotheses to test: (a) chat-template mismatch — V4's tool-call emit format may differ from what gate-tools.sh expects (which is OpenAI tool_calls JSON in the response object). (b) Special-token logit drift — Q8 → smaller-quant rounding moves the discrimination-critical special tokens enough to skip the tool-call format trigger; Q4_K_M-XL's failure data argues against this but worth confirming. (c) Sampler / temperature interaction — gate-tools uses different sampling than Q8_0 was trained for. (d) Server-side tool-binding bug specific to non-Q8 quants in the V4 fork.\n\nDeliverables: (1) read tools/v4-port/gate-tools.sh and figure out what exact request format it sends and what response shape it asserts. (2) Compare Q8_0 success response vs Q4_K_M-XL / Q2_K-XL failure response token-by-token to isolate where they diverge. (3) Try Q4_K_M-XL with a stripped-down hand-crafted prompt (no chat template, just the function definition + 'call get_weather for Paris') to see if it can emit tool_call JSON outside the harness. (4) If it's a template issue: patch the gate or document the right template for V4 sub-Q8 quants. (5) If it's a real quant issue: write up under what conditions tool calling does/doesn't work, update README accordingly.\n\nEstimated effort: half a day. Does NOT block the published quants — README is already toned down to call this 'unverified' rather than 'broken'."
+    }
+  ],
+  "errors": []
+}
