@@ -1,0 +1,23 @@
+{
+  "id": "v4-port-I2-imatrix-completeness",
+  "title": "Fix V4 imatrix collector gaps (attn_output_a) + tighten gate to assert data not just names",
+  "state": "roadmap",
+  "branch": "feat/v4-port-I2-imatrix-completeness",
+  "parent_branch": "feat/v4-port",
+  "spec_path": null,
+  "plan_path": null,
+  "review_rounds": 0,
+  "fix_attempts": 0,
+  "in_progress": false,
+  "depends_on": [],
+  "history": [
+    {
+      "at": "2026-05-08T14:05:00Z",
+      "from": null,
+      "to": "roadmap",
+      "agent": "user",
+      "note": "Created. Surfaced during the v4-port-J IQ1_S build attempt: the imatrix .dat from Task I has 43 bare-name-only entries (one per layer, all `attn_output_a.weight`) without the matching `.counts` and `.in_sum2` accumulator outputs. llama-quantize bails on these tensors at IQ1 because there's no actual data. Strategy 4+2's early op-class skip is too aggressive at recording-but-not-accumulating. Additionally, `tests/v4-port/gate-imatrix.sh`'s per-class layer count gates on NAME presence rather than DATA completeness, so it passed even though attn_output_a's data was missing. Both bugs need fixing in a Task I-2 follow-up.\n\nDeliverables: (1) extend `tools/imatrix/imatrix.cpp` so attn_output_a's matmul actually accumulates activations (likely needs to find which graph node consumes attn_output_a first and ensure the collector hook fires there, or relax the early skip just for this op shape); (2) update `tests/v4-port/gate-imatrix.sh` and the Task 5 production-coverage python check to require BOTH `<name>.counts` AND `<name>.in_sum2` for every (layer, class) entry; (3) regenerate `tests/v4-port/calibration/imatrix-v4-flash.dat` with the fixed collector; (4) republish to HF (overwrite `imatrix/imatrix-v4-flash.dat` on `teamblobfish/DeepSeek-V4-Flash-GGUF` once verified); (5) optionally also rebuild Task J's IQ1 quants without the attn_output_a workaround pin (saves ~1 GiB but secondary). Detailed memory: project_v4_task_i_followups.md.\n\nDoes NOT block Task J: Task J ships with `--tensor-type attn_output_a=q5_K` workaround already in place. This task is the proper fix to schedule once J ships."
+    }
+  ],
+  "errors": []
+}
