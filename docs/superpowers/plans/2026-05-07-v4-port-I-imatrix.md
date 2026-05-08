@@ -88,28 +88,51 @@ git commit --allow-empty -m "v4-port-I: ASan debug build configured for imatrix 
 **Files:**
 - Create: `docs/plans/v4-port-imatrix-diagnosis.md`
 
-- [ ] **Step 1: Download a tiny calibration sample**
+- [ ] **Step 1: Extract a small wikitext sample for reproduction**
 
-The full wikitext-103 corpus is overkill for reproduction; a small text file is enough to trigger the crash on the first chunk.
+Use a small extract from the same `wikitext-103-raw-v1` test split that Task 5's full calibration uses. Using wikitext (not synthetic text) ensures the diagnosis hits the same activation distribution as the production calibration; only the chunk count differs.
 
 ```bash
 mkdir -p tests/v4-port/calibration
-cat > tests/v4-port/calibration/tiny-sample.txt <<'EOF'
-The quick brown fox jumps over the lazy dog. The five boxing wizards jump quickly.
-Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump.
-Sphinx of black quartz, judge my vow. The job requires extra pluck and zeal from every young wage earner.
-Waltz, bad nymph, for quick jigs vex. Bright vixens jump; dozy fowl quack.
-Jackdaws love my big sphinx of quartz. The five boxing wizards jump quickly.
-EOF
+
+# Pull the test split parquet (same source as Task 5)
+hf download wikitext --repo-type dataset \
+  --include "wikitext-103-raw-v1/test-*.parquet" \
+  --local-dir /tmp/wikitext-test/
+
+# Extract first ~50 non-empty paragraphs
+python3 <<'PYEOF'
+import pandas as pd, glob
+files = sorted(glob.glob('/tmp/wikitext-test/wikitext-103-raw-v1/test-*.parquet'))
+out_path = 'tests/v4-port/calibration/wikitext-tiny.txt'
+written = 0
+with open(out_path, 'w') as out:
+    for f in files:
+        df = pd.read_parquet(f)
+        for line in df['text']:
+            if not line or not line.strip():
+                continue
+            out.write(line)
+            written += 1
+            if written >= 50:
+                break
+        if written >= 50:
+            break
+print(f'wrote {written} paragraphs to {out_path}')
+PYEOF
+
+ls -la tests/v4-port/calibration/wikitext-tiny.txt
 ```
+
+Expected: file exists, ≥10 KB.
 
 - [ ] **Step 2: Run llama-imatrix and capture full output**
 
 ```bash
 ./build-asan/bin/llama-imatrix \
   -m "$V4_GGUF" \
-  -f tests/v4-port/calibration/tiny-sample.txt \
-  --chunks 2 \
+  -f tests/v4-port/calibration/wikitext-tiny.txt \
+  --chunks 5 \
   -ngl 999 \
   2>&1 | tee /tmp/imatrix-asan.log
 ```
@@ -138,8 +161,8 @@ cat > docs/plans/v4-port-imatrix-diagnosis.md <<'EOF'
 ## Reproducer
 - Binary: build-asan/bin/llama-imatrix (ASan debug build of feat/v4-port HEAD)
 - Model: ~/models/DeepSeek-V4-Flash-Q8_0.gguf
-- Calibration: tests/v4-port/calibration/tiny-sample.txt
-- Chunks: 2
+- Calibration: tests/v4-port/calibration/wikitext-tiny.txt (extracted from wikitext-103-raw-v1 test split)
+- Chunks: 5
 - NGL: 999
 
 ## Crash report
@@ -174,7 +197,7 @@ The implementer fills in the parenthesized sections from the crash report. **Do 
 - [ ] **Step 5: Commit the diagnosis**
 
 ```bash
-git add docs/plans/v4-port-imatrix-diagnosis.md tests/v4-port/calibration/tiny-sample.txt
+git add docs/plans/v4-port-imatrix-diagnosis.md tests/v4-port/calibration/wikitext-tiny.txt
 git commit -m "v4-port-I: diagnosis - imatrix segfault root cause + chosen fix strategy"
 ```
 
@@ -239,7 +262,18 @@ This strategy is more involved. If it's selected, the implementer must read the 
 
 Edit `tools/imatrix/imatrix.cpp` per the strategy above. The diff should be small (≤10 lines for Strategy 1 or 2; ≤30 for Strategy 3).
 
-- [ ] **Step 2: Rebuild llama-imatrix (release build, not ASan)**
+- [ ] **Step 2: Configure release `build/` if not already (fresh worktree may not have it)**
+
+```bash
+# Idempotent: skips if build/ is already configured.
+if [ ! -f build/CMakeCache.txt ]; then
+    cmake -B build -DCMAKE_BUILD_TYPE=Release
+fi
+```
+
+Expected: cmake configures or reports "Skipping" if already done.
+
+- [ ] **Step 3: Rebuild llama-imatrix (release build, not ASan)**
 
 ```bash
 cmake --build build --target llama-imatrix -j
@@ -247,12 +281,12 @@ cmake --build build --target llama-imatrix -j
 
 Expected: build completes cleanly. Use the release `build/` not `build-asan/` from now on; ASan was just for diagnosis.
 
-- [ ] **Step 3: Verify the fix unblocks the reproducer**
+- [ ] **Step 4: Verify the fix unblocks the reproducer**
 
 ```bash
 ./build/bin/llama-imatrix \
   -m "$V4_GGUF" \
-  -f tests/v4-port/calibration/tiny-sample.txt \
+  -f tests/v4-port/calibration/wikitext-tiny.txt \
   -o /tmp/imatrix-test.dat \
   --chunks 2 \
   -ngl 999 \
@@ -261,7 +295,7 @@ Expected: build completes cleanly. Use the release `build/` not `build-asan/` fr
 
 Expected: completes without segfault, prints "save_imatrix" line, exits 0. The output `/tmp/imatrix-test.dat` exists.
 
-- [ ] **Step 4: Commit the fix**
+- [ ] **Step 5: Commit the fix**
 
 ```bash
 git add tools/imatrix/imatrix.cpp
@@ -296,7 +330,7 @@ ROOT="$(cd "$DIR/../.." && pwd)"
 
 V4_GGUF="${V4_GGUF:-$HOME/models/DeepSeek-V4-Flash-Q8_0.gguf}"
 BIN="${LLAMA_IMATRIX_BIN:-$ROOT/build/bin/llama-imatrix}"
-SAMPLE="$DIR/calibration/tiny-sample.txt"
+SAMPLE="$DIR/calibration/wikitext-tiny.txt"
 OUT=$(mktemp -t imatrix-gate.XXXXXX.dat)
 
 if [ ! -f "$V4_GGUF" ]; then
@@ -327,12 +361,13 @@ if [ ! -s "$OUT" ]; then
     exit 1
 fi
 
-# Minimum tensor count check. V4 has 43 layers; even at chunks=2 we
-# expect at least one entry per attention projection per layer that
-# the calibration corpus exercises. Use a conservative floor of 50
-# to catch "fix accidentally skips everything" regressions.
+# Minimum tensor count check. V4 has 43 layers × 5 attention + 3 expert
+# = 8 tensor classes. At chunks=2 we expect coverage to be partial but
+# not minimal: at least 100 distinct tensor entries indicates the fix
+# isn't accidentally skipping whole tensor classes. The full per-class
+# coverage check (~344 expected) lives in the Task 5 production run.
 TENSOR_COUNT=$(strings "$OUT" | grep -cE '^blk\.[0-9]+\.' || true)
-MIN_TENSORS=50
+MIN_TENSORS=100
 if [ "$TENSOR_COUNT" -lt "$MIN_TENSORS" ]; then
     echo "FAIL: imatrix output has only $TENSOR_COUNT tensors, expected >= $MIN_TENSORS"
     exit 1
@@ -463,58 +498,78 @@ Expected output: `tests/v4-port/calibration/wikitext.txt` exists, ≥1MB.
 
 Expected: runs ~30-60 minutes on M3 Ultra, prints periodic chunk progress, exits 0. Final output: `tests/v4-port/calibration/imatrix-v4-flash.dat` (~few MB).
 
-- [ ] **Step 3: Verify tensor coverage**
+- [ ] **Step 3: Verify tensor coverage (per-class assertions)**
 
-The spec's success criterion #1 requires coverage of:
-- All 5 attention projections per layer: `attn_q_a`, `attn_q_b`, `attn_kv`, `attn_output_a`, `attn_output_b` × 43 layers = 215 attention tensors
-- All 3 expert tensors per layer × 256 experts: `ffn_gate_exps`, `ffn_up_exps`, `ffn_down_exps` × 43 layers = 129 expert MoE tensors (each holds 256 experts)
+The spec's success criterion #1 requires coverage of all five attention projection classes (each appearing once per layer × 43 layers) and all three MoE expert tensor classes (each appearing once per layer × 43 layers; 256 experts is the internal dimension of each tensor, not a tensor multiplier).
+
+This check enforces per-class minimums rather than just an aggregate count, so a fix that accidentally skips one whole tensor class (e.g. all `attn_kv`) still fails the check.
 
 ```bash
 python3 <<'EOF'
 import re, sys
 content = open('tests/v4-port/calibration/imatrix-v4-flash.dat', 'rb').read()
-text_blobs = re.findall(rb'blk\.\d+\.[a-z_.]+', content)
-unique = sorted({b.decode() for b in text_blobs})
-attn = [t for t in unique if any(k in t for k in ['attn_q_a','attn_q_b','attn_kv','attn_output_a','attn_output_b'])]
-exp  = [t for t in unique if 'ffn_' in t and '_exps' in t]
-print(f'attention projection tensors collected: {len(attn)}  (expect ~215 for 43 layers)')
-print(f'expert MoE tensors collected:           {len(exp)}   (expect ~129 for 43 layers)')
-if len(attn) < 200:
-    print('FAIL: attention coverage below threshold')
+unique = sorted({b.decode() for b in re.findall(rb'blk\.\d+\.[a-z_.]+', content)})
+
+# Per-class expected: each tensor class should appear in ~all 43 layers.
+# Allow a 5-layer slack for layers where the calibration corpus may not
+# have exercised some path (rare but possible at long-context-only ops).
+ATTN_CLASSES = ['attn_q_a', 'attn_q_b', 'attn_kv', 'attn_output_a', 'attn_output_b']
+EXPERT_CLASSES = ['ffn_gate_exps', 'ffn_up_exps', 'ffn_down_exps']
+PER_CLASS_MIN = 38   # 43 layers minus 5-layer slack
+
+def count_class(cls):
+    return sum(1 for t in unique if f'.{cls}.' in t or t.endswith(f'.{cls}'))
+
+print('Per-class coverage (V4 has 43 layers; threshold ≥ %d each):' % PER_CLASS_MIN)
+fail = False
+for cls in ATTN_CLASSES + EXPERT_CLASSES:
+    n = count_class(cls)
+    status = 'PASS' if n >= PER_CLASS_MIN else 'FAIL'
+    if n < PER_CLASS_MIN:
+        fail = True
+    print(f'  {cls:25s}  {n:3d}  {status}')
+
+if fail:
+    print('FAIL: at least one tensor class has insufficient layer coverage.')
+    print('      The fix is skipping tensors that should be calibrated. Re-evaluate Task 3.')
     sys.exit(1)
-if len(exp) < 100:
-    print('FAIL: expert coverage below threshold')
-    sys.exit(1)
-print('PASS: tensor coverage acceptable')
+print('PASS: per-class tensor coverage acceptable')
 EOF
 ```
 
-Expected: PASS line. If FAIL: the fix is too aggressive (skipping too much). Re-evaluate the fix in Task 3.
+Expected: PASS for all 8 classes. If any class fails, the fix is too aggressive — it's skipping a tensor class that the calibration needs. Re-evaluate Task 3.
 
-- [ ] **Step 4: Add the calibration data file to git (it's small)**
+- [ ] **Step 4: Verify the artifact exists on disk (NOT committed)**
+
+The .dat file is a binary calibration artifact. It is **never committed to git** — the V4 quant pipeline is local-machine-bound (the V4 GGUF source is also not in git), and Task J reads the .dat directly from this on-disk path on the same machine. If it ever needs to outlive this machine, upload to HF as a release asset, do not commit.
 
 ```bash
 ls -lh tests/v4-port/calibration/imatrix-v4-flash.dat
-# verify size: should be a few MB, not gigabytes
-git add tests/v4-port/calibration/imatrix-v4-flash.dat
+# Sanity check that it exists and is non-trivial.
+# Size will be much larger than typical V3 imatrix (~few MB) because
+# V4 has 43 layers × 256 experts × multiple projections — hundreds of
+# MB is plausible. The size sanity is "non-empty"; the real quality
+# check is per-class tensor coverage in Step 3 above.
 ```
 
-- [ ] **Step 5: Add wikitext source to .gitignore (large, transient)**
+- [ ] **Step 5: Add calibration outputs and source data to .gitignore**
 
 ```bash
 cat >> .gitignore <<'EOF'
 
-# imatrix calibration source data (large, regenerable)
+# imatrix calibration data (binary, regenerable, machine-local)
+tests/v4-port/calibration/imatrix-v4-flash.dat
 tests/v4-port/calibration/wikitext/
 tests/v4-port/calibration/wikitext.txt
 EOF
 git add .gitignore
 ```
 
-- [ ] **Step 6: Commit the calibration data**
+- [ ] **Step 6: Commit the .gitignore update**
 
 ```bash
-git commit -m "v4-port-I: produce imatrix-v4-flash.dat from wikitext-103 (1000 chunks)"
+git status   # confirm only .gitignore is staged; no .dat or wikitext blobs
+git commit -m "v4-port-I: gitignore imatrix calibration outputs (binary, machine-local)"
 ```
 
 ---
@@ -558,7 +613,7 @@ git push mine feat/v4-port-I-imatrix
 - [ ] `docs/plans/v4-port-imatrix-diagnosis.md` written, names exact crash site + chosen strategy + rejected alternatives
 - [ ] `tests/v4-port/gate-imatrix.sh` created, executable, passes locally
 - [ ] `tests/v4-port/run-all-gates.sh` includes the new gate, full suite passes
-- [ ] `tests/v4-port/calibration/imatrix-v4-flash.dat` exists and committed (≥200 attention + ≥100 expert tensors covered)
+- [ ] `tests/v4-port/calibration/imatrix-v4-flash.dat` exists on disk and is .gitignored (≥200 attention + ≥100 expert tensors covered) — the file is binary, machine-local, and consumed by Task J on the same machine; never commit it to git
 - [ ] Branch `feat/v4-port-I-imatrix` pushed to `mine`
 - [ ] Codex plan-review and code-review both APPROVE (per dev-team workflow)
 

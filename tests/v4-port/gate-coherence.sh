@@ -19,8 +19,26 @@ LOG_OUT=$(mktemp -t v4-port-gate-coherence-out.XXXXXX)
 LOG_ERR=$(mktemp -t v4-port-gate-coherence-err.XXXXXX)
 trap 'rm -f "$LOG_OUT" "$LOG_ERR"' EXIT
 
-"$LLAMA_BIN/bin/llama-completion" -m "$V4_GGUF" -ngl "$NGL" \
-  -p "The capital of France is" -n 30 --no-warmup --temp 0 -no-cnv \
+# --no-repack: V4 Q8_0 is ~282 GiB on disk. With repack ON (the default),
+# the loader allocates a CPU_REPACK buffer the same size as the mmap'd model
+# AND keeps the source mmap resident — the repack codepath in
+# ggml/src/ggml-cpu/repack.cpp does not release the source pages after
+# populating the SIMD-friendly layout (see src/llama-model-loader.cpp:1555).
+# That doubles the memory requirement to ~575 GiB, which exceeds the 512 GiB
+# physical RAM on M3 Ultra hosts and triggers an OOM SIGKILL well before any
+# generation completes. This is a llama.cpp upstream issue independent of
+# Task I's imatrix work; until that's fixed we disable repack here so the
+# coherence gate exercises the (slower but correct) non-repacked CPU path.
+# Prompt: open-ended narrative continuation. At --temp 0 the model picks
+# argmax tokens, which means a short factual prompt ("The capital of France
+# is") collapses to "Paris." and then repeats that sentence to fill the
+# requested -n 30 — tripping the repetitive-decode heuristic below even
+# though the output is correct. A narrative prompt forces the model to
+# generate varied story text, exercising the same coherence properties
+# without the repetition trap.
+"$LLAMA_BIN/bin/llama-completion" -m "$V4_GGUF" -ngl "$NGL" --no-repack \
+  -p "Once upon a time, in a small village by the sea, there lived" \
+  -n 30 --no-warmup --temp 0 -no-cnv \
   < /dev/null > "$LOG_OUT" 2> "$LOG_ERR" || true
 
 # Show a few last lines (use whichever stream — they're separate now).
@@ -42,7 +60,7 @@ fi
 # trailer the new CLI prints when it exits.
 GEN=$(tr -d '\r' < "$LOG_OUT")
 GENONLY=$(printf '%s' "$GEN" \
-  | sed 's/The capital of France is//' \
+  | sed 's/Once upon a time, in a small village by the sea, there lived//' \
   | sed 's/> EOF by user//' \
   | tr '\n' ' ')
 
