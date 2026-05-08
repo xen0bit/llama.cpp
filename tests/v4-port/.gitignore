@@ -1,0 +1,5 @@
+# Track calibration scripts and committed artifacts; ignore large
+# transient source data downloaded by Task 5.
+!calibration/
+calibration/wikitext/
+calibration/wikitext.txt
