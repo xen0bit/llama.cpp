@@ -42,8 +42,10 @@ Expected: configures and builds successfully.
 
 - [ ] **Step 1.3: Baseline test run**
 
-Run: `./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_HC_SPLIT_SINKHORN 2>&1 | tail -20`
+Run: `./build-cuda/bin/test-backend-ops -o DSV4_HC_SPLIT_SINKHORN 2>&1 | tail -20`
 Expected: PASSES via CPU fallback. Becomes a real comparison once CUDA kernel registered.
+
+**Note on `-b` flag (plan v2 fix):** `test-backend-ops` parses `-b` via exact `strcmp` (test-backend-ops.cpp:9882) — it does NOT support comma-separated lists. The CUDA device name is `CUDA0` / `CUDA1` (per `ggml-cuda.cu:4680` + `common.cuh:1429`), not bare `CUDA`. With no `-b` flag, the harness iterates every device, auto-skipping CPU and using it internally as the reference for comparison (test-backend-ops.cpp:9615-9620). That's what we want: every CUDA device runs against the CPU reference. Stream A's `-b CPU,CUDA` shorthand was incorrect — it would silently skip everything and the COUNT assertion would catch it as 0/0.
 
 ---
 
@@ -165,19 +167,37 @@ void ggml_cuda_op_dsv4_hc_split_sinkhorn(ggml_backend_cuda_context & ctx, ggml_t
     GGML_ASSERT(scale->type == GGML_TYPE_F32);
     GGML_ASSERT(base->type  == GGML_TYPE_F32);
     GGML_ASSERT(dst->type   == GGML_TYPE_F32);
-    GGML_ASSERT(mixes->ne[2] == 1 && mixes->ne[3] == 1);
+    GGML_ASSERT(mixes->nb[0] == sizeof(float));
+    GGML_ASSERT(scale->nb[0] == sizeof(float));
+    GGML_ASSERT(base->nb[0]  == sizeof(float));
+    GGML_ASSERT(dst->nb[0]   == sizeof(float));
 
     const int n_hc           = ggml_get_op_params_i32(dst, 0);
     const int sinkhorn_iters = ggml_get_op_params_i32(dst, 1);
     const float eps          = ggml_get_op_params_f32(dst, 2);
 
-    const int n_rows = (int)(mixes->ne[1] * mixes->ne[2] * mixes->ne[3]);
+    GGML_ASSERT(n_hc > 0 && n_hc <= 16);
+    GGML_ASSERT(sinkhorn_iters > 0);
+
+    const int n_rows = (int)ggml_nrows(mixes);
     const int mix_hc = (int)(mixes->ne[0]);
     const int nb01   = (int)(mixes->nb[1]);
     const int nb1    = (int)(dst->nb[1]);
 
-    constexpr int blk = 256;
-    const int threads_per_block = std::min(blk, mix_hc);  // one thread per element in the row
+    GGML_ASSERT(mix_hc == (2 + n_hc) * n_hc);
+    GGML_ASSERT((int)ggml_nrows(dst) == n_rows);
+
+    // Block size MUST be a multiple of WARP_SIZE (32) and at least 32.
+    // ggml-cuda's block_reduce (common.cuh:599) asserts `block_size % WARP_SIZE == 0`
+    // and the warp_reduce_sum shuffle uses the full 0xffffffff mask, which is UB
+    // when inactive lanes participate. Stream A's cases have mix_hc in {24, 80};
+    // both must round up: 24 -> 32, 80 -> 96. Kernel guards loop bounds with
+    // `i < mix_hc` so the extra threads do no useful work but stay active for
+    // the reductions.
+    constexpr int WARP_SIZE_PLAN = 32;
+    constexpr int MAX_BLOCK = 256;
+    const int rounded = ((mix_hc + WARP_SIZE_PLAN - 1) / WARP_SIZE_PLAN) * WARP_SIZE_PLAN;
+    const int threads_per_block = std::min(MAX_BLOCK, std::max(WARP_SIZE_PLAN, rounded));
     const dim3 grid(n_rows);
     const dim3 block(threads_per_block);
     const size_t shared = mix_hc * sizeof(float);
@@ -218,83 +238,139 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 **Files:** Modify: `ggml/src/ggml-cuda/dsv4-hc-split-sinkhorn.cu`
 
-- [ ] **Step 5.1: Implement the Sinkhorn iteration loop**
+- [ ] **Step 5.1: Implement the kernel body (faithful translation of CPU reference)**
 
-Replace the TODO with a translation of Metal's kernel body. Key structure:
+**CRITICAL ALGORITHM NOTE:** The CPU reference (`ggml/src/ggml-cpu/ops.cpp:11037-11117`) and Metal kernel split the output into THREE distinct sections — only the third is Sinkhorn-normalized. Do NOT normalize the entire mix_hc vector.
+
+Layout per row (mix_hc = (2 + n_hc) * n_hc; scale is [3] = pre/post/comb; base is [mix_hc]):
+
+1. **pre slice** out[0..n_hc): `out[i] = sigmoid(mix[i] * pre_scale + base[i]) + eps`
+2. **post slice** out[n_hc..2*n_hc): `out[n_hc+i] = 2 * sigmoid(mix[n_hc+i] * post_scale + base[n_hc+i])`
+3. **comb matrix** out[2*n_hc..mix_hc): n_hc × n_hc matrix indexed `c[src_hc + dst_hc*n_hc]`:
+   a. Apply scale+base to get logits: `c[idx] = mix[2*n_hc+idx] * comb_scale + base[2*n_hc+idx]`.
+   b. First-iter softmax over src_hc per dst_hc row (max-subtract + exp + normalize), then add eps.
+   c. Column-normalize (sum over dst_hc per src_hc, divide by sum+eps).
+   d. For iter in [1, sinkhorn_iters): row-normalize (sum over src_hc, divide by sum+eps) then column-normalize.
+4. Copy c[] to out[2*n_hc..].
+
+Pseudocode (faithful to CPU lines 11037-11117; n_hc <= 16 per assert at line 11014):
 
 ```cpp
-extern __shared__ float shmem[];  // size = mix_hc floats
+extern __shared__ float shmem[];  // sized to hold the n_hc*n_hc comb matrix; mix_hc floats suffices since mix_hc >= n_hc*n_hc + 2*n_hc.
 
-const int tid = threadIdx.x;
-const int blksz = blockDim.x;
+const int tid    = threadIdx.x;
+const int blksz  = blockDim.x;  // warp multiple, possibly > mix_hc
 
-// Load mixes row into shared memory
-const float * row_in = (const float *)((const char *)mixes + row * nb01);
-for (int i = tid; i < mix_hc; i += blksz) {
-    shmem[i] = row_in[i];
+const float pre_scale  = scale[0];
+const float post_scale = scale[1];
+const float comb_scale = scale[2];
+
+const float * row_in  = (const float *)((const char *)mixes + row * nb01);
+float       * row_out = (float *)((char *)dst + row * nb1);
+
+// Section 1 — pre slice: out[0..n_hc) = sigmoid(z) + eps
+for (int i = tid; i < n_hc; i += blksz) {
+    const float z = row_in[i] * pre_scale + base[i];
+    row_out[i] = 1.0f / (1.0f + expf(-z)) + eps;
+}
+
+// Section 2 — post slice: out[n_hc..2*n_hc) = 2 * sigmoid(z)
+for (int i = tid; i < n_hc; i += blksz) {
+    const int off = n_hc + i;
+    const float z = row_in[off] * post_scale + base[off];
+    row_out[off] = 2.0f / (1.0f + expf(-z));
+}
+
+// Section 3 — comb matrix into shared mem (c laid out src_hc + dst_hc*n_hc)
+float * c = shmem;  // n_hc*n_hc floats
+for (int i = tid; i < n_hc*n_hc; i += blksz) {
+    const int off = 2*n_hc + i;
+    c[i] = row_in[off] * comb_scale + base[off];
 }
 __syncthreads();
 
-for (int it = 0; it < sinkhorn_iters; ++it) {
-    // Row normalize: sum across the mix_hc dimension via shared-mem reduce
-    float local = 0.0f;
-    for (int i = tid; i < mix_hc; i += blksz) {
-        local += shmem[i];
-    }
-    // Reduce within block
-    float row_sum = blockReduceSum(local);  // helper from common.cuh or write inline
-    __shared__ float s_row_sum;
-    if (tid == 0) s_row_sum = row_sum + eps;
-    __syncthreads();
-    for (int i = tid; i < mix_hc; i += blksz) {
-        shmem[i] /= s_row_sum;
-    }
-    __syncthreads();
-
-    // Column normalize (per element, with normalization factor across rows)
-    // NOTE: column normalization here is across the mix_hc dimension internally
-    // — verify against Metal source whether this is a separate dimension or
-    // an inner detail of the Sinkhorn loop.
-    // If column-normalization is across rows, this requires inter-block
-    // sync which isn't possible in one kernel launch — Metal may use a
-    // two-pass or per-row-only normalization. Re-read Metal source carefully.
-}
-
-// Combine with scale + base, write to output
-for (int i = tid; i < mix_hc; i += blksz) {
-    // Translation of the combination logic from Metal lines ~2200-2245
-    // (look up exact lines and translate the arithmetic verbatim)
-    // dst[hc, row] = scale[hc, row] * shmem[i] + base[hc, row]
-    // (or whatever the Metal kernel does)
-}
-```
-
-**Critical:** Re-read `ggml-metal.metal:2076-2245` carefully to understand whether "Sinkhorn" here means doubly-stochastic across rows AND columns of the [mix_hc, n_rows] matrix, OR a per-row normalization that the name "Sinkhorn" is being slightly misused for. The latter is a single-kernel-launch operation; the former needs two-pass or atomic-based cooperative reduction across blocks.
-
-- [ ] **Step 5.2: Add blockReduceSum helper if not present**
-
-If `common.cuh` doesn't expose a block-wide reduction, write inline:
-```cpp
-__device__ __forceinline__ float blockReduceSum(float v) {
-    // Standard warp shuffle + shared-mem reduce. ggml-cuda likely already
-    // has this; check common.cuh first.
-    __shared__ float buf[32];
-    int lane = threadIdx.x & 31;
-    int wid  = threadIdx.x >> 5;
-    for (int o = 16; o > 0; o >>= 1) {
-        v += __shfl_down_sync(0xffffffff, v, o);
-    }
-    if (lane == 0) buf[wid] = v;
-    __syncthreads();
-    v = (threadIdx.x < (blockDim.x + 31) / 32) ? buf[lane] : 0.0f;
-    if (wid == 0) {
-        for (int o = 16; o > 0; o >>= 1) {
-            v += __shfl_down_sync(0xffffffff, v, o);
+// Iter 0: per-dst_hc softmax (max-subtract, exp, normalize), + eps
+// Parallelize across dst_hc rows. n_hc is tiny (<=16), so one thread per row works.
+// All threads in the warp participate in the reduce; out-of-bounds threads
+// contribute identity values (-INFINITY for max, 0 for sum). Since n_hc<=16
+// and we round block size to >=32, all reductions fit in a single warp_reduce
+// using __shfl_xor or block_reduce on the full warp.
+//
+// Simpler: serialize each dst_hc row across the warp (n_hc <=16 is too small
+// to benefit from parallel reduce per row). Pseudocode:
+if (tid == 0) {
+    for (int dst_hc = 0; dst_hc < n_hc; ++dst_hc) {
+        float row_max = -INFINITY;
+        for (int src_hc = 0; src_hc < n_hc; ++src_hc) {
+            row_max = fmaxf(row_max, c[src_hc + dst_hc*n_hc]);
+        }
+        float row_sum = 0.0f;
+        for (int src_hc = 0; src_hc < n_hc; ++src_hc) {
+            const int idx = src_hc + dst_hc*n_hc;
+            const float v = expf(c[idx] - row_max);
+            c[idx] = v;
+            row_sum += v;
+        }
+        const float inv_sum = 1.0f / row_sum;
+        for (int src_hc = 0; src_hc < n_hc; ++src_hc) {
+            const int idx = src_hc + dst_hc*n_hc;
+            c[idx] = c[idx] * inv_sum + eps;
         }
     }
-    return v;
+
+    // First column-normalize (per src_hc, sum over dst_hc, divide by sum+eps).
+    for (int src_hc = 0; src_hc < n_hc; ++src_hc) {
+        float sum = 0.0f;
+        for (int dst_hc = 0; dst_hc < n_hc; ++dst_hc) {
+            sum += c[src_hc + dst_hc*n_hc];
+        }
+        const float inv_denom = 1.0f / (sum + eps);
+        for (int dst_hc = 0; dst_hc < n_hc; ++dst_hc) {
+            c[src_hc + dst_hc*n_hc] *= inv_denom;
+        }
+    }
+
+    // Remaining sinkhorn_iters - 1 iterations: row-normalize then column-normalize.
+    for (int it = 1; it < sinkhorn_iters; ++it) {
+        for (int dst_hc = 0; dst_hc < n_hc; ++dst_hc) {
+            float sum = 0.0f;
+            for (int src_hc = 0; src_hc < n_hc; ++src_hc) {
+                sum += c[src_hc + dst_hc*n_hc];
+            }
+            const float inv_denom = 1.0f / (sum + eps);
+            for (int src_hc = 0; src_hc < n_hc; ++src_hc) {
+                c[src_hc + dst_hc*n_hc] *= inv_denom;
+            }
+        }
+        for (int src_hc = 0; src_hc < n_hc; ++src_hc) {
+            float sum = 0.0f;
+            for (int dst_hc = 0; dst_hc < n_hc; ++dst_hc) {
+                sum += c[src_hc + dst_hc*n_hc];
+            }
+            const float inv_denom = 1.0f / (sum + eps);
+            for (int dst_hc = 0; dst_hc < n_hc; ++dst_hc) {
+                c[src_hc + dst_hc*n_hc] *= inv_denom;
+            }
+        }
+    }
+}
+__syncthreads();
+
+// Copy comb matrix to output section 3.
+for (int i = tid; i < n_hc*n_hc; i += blksz) {
+    row_out[2*n_hc + i] = c[i];
 }
 ```
+
+**Performance note:** The single-thread serial inner loop is acceptable because n_hc <= 16 (asserted at CPU ops.cpp:11014); total comb-matrix work per row is O(n_hc^2 * sinkhorn_iters) = at most 16*16*N = ~1000 ops. Optimizing this further (e.g., warp-parallel reductions per dst_hc row) is out of scope per agent spec L52 ("Optimize beyond functional parity"). The performance-critical part is the n_rows-level parallelism (one block per row), which scales.
+
+**Why this is correct:** Direct line-by-line translation of CPU reference at ops.cpp:11037-11117. The kernel is functional-parity, not optimized; correctness is the bar.
+
+Block size is still computed as in Step 4.1 (rounded up to warp multiple from mix_hc) — Sections 1, 2, and the final copy benefit from blksz-wise parallelism even though Section 3 is serial on tid==0.
+
+- [ ] **Step 5.2: (deleted — block reduction no longer needed)**
+
+The v5 algorithm rewrite (Step 5.1) does Section 3's Sinkhorn iterations serially on `tid == 0` because n_hc <= 16 makes the inner work trivial. No block-wide reductions required. Sections 1, 2, and the final copy use simple `for (i = tid; i < n; i += blksz)` patterns with no inter-thread communication. The block_reduce concern from r4 is now moot for this kernel — but the warp-multiple block-size requirement from Step 4.1 is retained for correctness of any future expansion AND to keep the `__syncthreads()` calls valid (`__syncthreads` requires consistent thread participation, which warp-multiple blocks guarantee).
 
 - [ ] **Step 5.3: Build**
 
@@ -359,13 +435,31 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 The harness reports success on `0/0` so SKIPPED/NOT_SUPPORTED would silently pass. Stream A registered **4 dsv4_hc_split_sinkhorn cases**.
 
 ```bash
-./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_HC_SPLIT_SINKHORN 2>&1 | tee /tmp/v4-cuda-B-sinkhorn-test.log | tail -30
-COUNT=$(grep -E "^\s+[0-9]+/[0-9]+ tests passed" /tmp/v4-cuda-B-sinkhorn-test.log | tail -1 | grep -oE "^\s+[0-9]+" | tr -d ' ')
-echo "Tests passed: ${COUNT:-0}"
-test "${COUNT:-0}" -ge 4 || { echo "FAIL: only ${COUNT:-0} of 4+ expected tests ran"; exit 1; }
+# Run to log; preserve exit status (don't pipe through tee|tail which masks $?).
+./build-cuda/bin/test-backend-ops -o DSV4_HC_SPLIT_SINKHORN > /tmp/v4-cuda-B-sinkhorn-test.log 2>&1
+RC=$?
+tail -50 /tmp/v4-cuda-B-sinkhorn-test.log
+test $RC -eq 0 || { echo "FAIL: test-backend-ops exited $RC"; exit 1; }
+
+# Parse every backend summary line; require each to report >= 4 tests passed,
+# AND require at least one CUDA-named backend in the log (guards against silent
+# CPU-only runs if CUDA device init failed). Bash 3.2-compatible (no mapfile).
+COUNTS=$(awk '/^[[:space:]]+[0-9]+\/[0-9]+ tests passed/ { split($1,a,"/"); print a[1] }' /tmp/v4-cuda-B-sinkhorn-test.log)
+set -- $COUNTS
+echo "Per-backend counts: ${COUNTS:-(none)}"
+test "$#" -ge 1 || { echo "FAIL: no backend summaries found"; exit 1; }
+grep -q "Backend.*CUDA" /tmp/v4-cuda-B-sinkhorn-test.log || { echo "FAIL: no CUDA backend ran"; exit 1; }
+for c in "$@"; do
+    test "$c" -ge 4 || { echo "FAIL: a backend reported only $c (need >= 4)"; exit 1; }
+done
+echo "PASS: all backends ran >= 4 sinkhorn cases, includes CUDA"
 ```
 
-Expected: tests PASS with `${COUNT:-0}` >= 4, CPU and CUDA matching within `max_nmse_err` (1e-3 per Stream A).
+Expected: every backend reports >= 4 tests passed, the log contains at least one `Backend ... CUDA` init line, and `test-backend-ops` exited 0. CPU is auto-skipped as reference; CUDA (and any other non-CPU device) runs the 4 sinkhorn cases against the CPU reference within `max_nmse_err` (1e-3 per Stream A).
+
+**Why no `-b` flag (plan v2 fix):** see Step 1.3 note. Omitting `-b` runs every non-CPU device against the CPU reference; this is the canonical comparison mode. `-b CPU,CUDA` is invalid syntax that silently no-ops to 0/0.
+
+**Why preserve exit + check all summaries (plan v2 fix):** `tee | tail` masks the binary's exit status, and `tail -1` only reads the LAST backend summary — on a multi-GPU host a no-op first backend would be invisible. The gate now (a) saves exit status, (b) iterates every summary line and asserts each >= 4, and (c) requires a CUDA backend init line in the log so a degraded CPU-only run can't silently pass.
 
 Common failure modes:
 - Wrong index decomposition (Metal uses col-major, your CUDA might assume row-major) → re-check `nb01` vs `nb1` semantics.
@@ -374,7 +468,7 @@ Common failure modes:
 
 - [ ] **Step 7.2: Run with compute-sanitizer**
 
-If available: `compute-sanitizer ./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_HC_SPLIT_SINKHORN 2>&1 | tail -20`
+If available: `compute-sanitizer ./build-cuda/bin/test-backend-ops -o DSV4_HC_SPLIT_SINKHORN 2>&1 | tail -20`
 Expected: no warnings.
 
 - [ ] **Step 7.3: Commit any debugging fixes**
