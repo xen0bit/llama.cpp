@@ -22,6 +22,7 @@
 #include "ggml-cuda/cumsum.cuh"
 #include "ggml-cuda/diagmask.cuh"
 #include "ggml-cuda/diag.cuh"
+#include "ggml-cuda/dsv4-hc-split-sinkhorn.cuh"
 #include "ggml-cuda/dsv4-rope-tail.cuh"
 #include "ggml-cuda/fattn.cuh"
 #include "ggml-cuda/getrows.cuh"
@@ -2960,6 +2961,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_LIGHTNING_INDEXER:
             ggml_cuda_op_lightning_indexer(ctx, dst);
             break;
+        case GGML_OP_DSV4_HC_SPLIT_SINKHORN:
+            ggml_cuda_op_dsv4_hc_split_sinkhorn(ctx, dst);
+            break;
         default:
             return false;
     }
@@ -5239,6 +5243,11 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_LIGHTNING_INDEXER:
             return true;
+        case GGML_OP_DSV4_HC_SPLIT_SINKHORN:
+            return op->src[0]->type == GGML_TYPE_F32 &&
+                   op->src[1]->type == GGML_TYPE_F32 &&
+                   op->src[2]->type == GGML_TYPE_F32 &&
+                   op->type         == GGML_TYPE_F32;
 
         default:
             return false;
