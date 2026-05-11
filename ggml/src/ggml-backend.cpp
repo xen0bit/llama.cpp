@@ -754,7 +754,14 @@ static bool ggml_is_view_op(enum ggml_op op) {
 #endif
 
 #ifndef GGML_SCHED_MAX_SPLIT_INPUTS
-#define GGML_SCHED_MAX_SPLIT_INPUTS 30
+// Default upstream is 30. V4 (DeepSeek-V4) graphs blow past that when split
+// across multiple devices: hyperconnection inputs (block_out, residual, post,
+// comb) × n_layers, indexer/compressor state segments, multiple KV caches,
+// attention compressor inputs, etc. Single-device runs never trip this
+// because there's no split. Bumped to 128 here so multi-GPU V4 inference
+// works with default `-fit on` parameter fitting. Reported by drros@
+// (3× RTX PRO 4000 Blackwell, 72 GB combined VRAM).
+#define GGML_SCHED_MAX_SPLIT_INPUTS 128
 #endif
 
 #ifndef GGML_SCHED_MAX_COPIES
