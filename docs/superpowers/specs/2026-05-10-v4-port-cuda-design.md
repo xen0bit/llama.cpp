@@ -84,26 +84,32 @@ build still produces a V4-capable binary.
 
 **Deliverables:**
 
-1. `tests/v4-port/fixtures/gen-dsv4-fixtures.cpp` — CLI utility that loads the
-   CPU reference path, generates seeded random input tensors of representative
-   shape per op, runs the op, dumps `{inputs, outputs, op_params}` as little-
-   endian binary to `tests/v4-port/fixtures/{op_name}.bin`.
-2. 5 new test classes in `tests/test-backend-ops.cpp` (one per op), following
-   the pattern of the existing ROPE tests at lines 2382-2526. Each loads its
-   `.bin` fixture, runs the op on every enabled backend, asserts the output
-   matches the dumped reference within tolerance.
-3. Per-op tolerance constants documented in-source with one-sentence rationale
-   each (e.g., "1e-4 abs — sinkhorn iterates 4× FP32 multiplies, max
-   accumulated rounding error empirical 3.2e-5 on CPU reference").
-4. `.gitignore` entry for `tests/v4-port/fixtures/*.bin` (binaries are
-   regenerated, never committed).
-5. README snippet in `tests/v4-port/fixtures/` explaining how to regenerate
-   fixtures (one command), so upstream maintainers can reproduce.
+1. 5 new `test_case` structs in `tests/test-backend-ops.cpp` (one per V4 op),
+   following the pattern of the existing `test_rope` at line 4645. Each struct
+   constructs the op's input tensors in `build_graph()` via `ggml_new_tensor_*`,
+   calls the `ggml_dsv4_*` public API, and returns the output node. The test-
+   backend-ops framework handles seeded random inputs and per-backend output
+   comparison automatically — no separate fixture binary or generator utility.
+2. Each test class overrides `max_nmse_err()` with the op-specific tolerance
+   (this is the upstream `test_case` API for backend-comparison tolerance).
+   Documented inline with a one-sentence rationale per op.
+3. Registration entries added to `main()` for every V4 op (multiple shape
+   variants per op so the comparison exercises both common and edge sizes).
 
-**Size:** ~600 lines (utility + 5 test classes + tolerance docs).
+**Size:** ~500 lines of additions to `test-backend-ops.cpp`. No new files.
 
 **Acceptance:** `cmake -B build-cpu -DGGML_CUDA=OFF -DGGML_METAL=OFF`,
-`./build-cpu/bin/test-backend-ops -o DSV4_ROPE_TAIL` (and equivalents) all pass.
+`./build-cpu/bin/test-backend-ops -o "DSV4_*"` exercises all 5 ops and all
+cases PASS on the CPU backend. Trivially-passing on CPU-only is expected;
+the comparison surface becomes meaningful once Streams B/C register CUDA
+kernels.
+
+**Why in-process seeded inputs and not binary fixtures:** This is upstream's
+convention for `test-backend-ops`. The framework runs each test case on every
+enabled backend with identical seeded inputs and compares outputs across
+backends. Adding a binary-fixture layer on top would duplicate functionality
+the framework already provides and deviate from how upstream maintainers
+evaluate new backend ports.
 
 ## Streams B1-B4: Four "easy" ops
 
@@ -215,31 +221,41 @@ kargs struct buffer. This follows the existing ggml-cuda pattern (see
 implementation detail of the Metal backend; the ABI contract is the parameter
 list, which is identical across both backends.
 
-## Data flow: gold-fixture protocol
+## Data flow: validation protocol
 
 ```
 [Stream A, one-time setup]
   Build CPU-only:
     cmake -B build-cpu -DGGML_CUDA=OFF -DGGML_METAL=OFF
-    cmake --build build-cpu --target gen-dsv4-fixtures
-  Generate fixtures:
-    ./build-cpu/bin/gen-dsv4-fixtures --seed 42 --out tests/v4-port/fixtures/
+    cmake --build build-cpu --target test-backend-ops
+  Run V4 tests on CPU:
+    ./build-cpu/bin/test-backend-ops -o "DSV4_*"
+  (Self-validates the test cases compile and run; comparison is trivially
+   CPU-vs-CPU since only one backend is enabled.)
 
 [Streams B/C development]
-  test-backend-ops loads .bin files, runs op on CUDA backend,
-  compares CUDA output against the dumped CPU reference output.
-  No model load required; runs in seconds.
+  Each stream's task list ends with rebuilding test-backend-ops with the
+  new CUDA kernel registered, then running the corresponding op test:
+    cmake --build build-cuda --target test-backend-ops
+    ./build-cuda/bin/test-backend-ops -o DSV4_ROPE_TAIL
+  The framework runs CPU and CUDA on identical seeded inputs and asserts
+  outputs match within max_nmse_err. Runs in seconds; no model load.
 
 [Validation session]
   Build CUDA:
     cmake -B build-cuda -DGGML_CUDA=ON
     cmake --build build-cuda
-  Run per-op:
-    ./build-cuda/bin/test-backend-ops -o DSV4_ROPE_TAIL,DSV4_HC_SPLIT_SINKHORN,...
-  Run gate suite:
+  Run all V4 ops:
+    ./build-cuda/bin/test-backend-ops -o "DSV4_*"
+  Run gate suite (whole-fit IQ1_S-XL):
     V4_GGUF=~/models/.../IQ1_S-XL/.../-00001-of-00002.gguf \
     LLAMA_BIN=build-cuda \
     tests/v4-port/run-all-gates.sh
+  Run gate-tools partial-offload (recommended quant Q4_K_M-XL):
+    V4_GGUF=~/models/.../Q4_K_M-XL/.../-00001-of-00004.gguf \
+    LLAMA_BIN=build-cuda \
+    NGL=20 \
+    tests/v4-port/gate-tools.sh
 ```
 
 CPU is the reference (not Metal). This matches upstream's `test-backend-ops`
