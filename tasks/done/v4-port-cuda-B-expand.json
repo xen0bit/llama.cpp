@@ -1,7 +1,7 @@
 {
   "id": "v4-port-cuda-B-expand",
   "title": "CUDA kernel for ggml_dsv4_hc_expand (V4 CUDA port Stream B4)",
-  "state": "testing",
+  "state": "done",
   "branch": "feat/v4-port-cuda-B-expand",
   "parent_branch": "feat/v4-port-cuda",
   "spec_path": ".claude/agents/v4-port-cuda-B-expand.md",
@@ -11,7 +11,9 @@
   "code_review_rounds": 1,
   "fix_attempts": 0,
   "in_progress": false,
-  "blocked_by": ["cuda-host-unavailable-on-darwin-orchestrator"],
+  "blocked_by": [
+    "cuda-host-unavailable-on-darwin-orchestrator"
+  ],
   "history": [
     {
       "at": "2026-05-11T00:30:00Z",
@@ -60,7 +62,15 @@
       "to": "testing",
       "agent": "orchestrator-gate",
       "note": "BLOCKED: CUDA gate cannot run from darwin/arm64 orchestrator (no nvcc). Required: run on RTX 6000 Ada / 5090 host: cmake -B build-cuda -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=\"89;120\" && cmake --build build-cuda -j --target test-backend-ops && ./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_HC_EXPAND. Expected COUNT >= 3. Implementation pushed to `mine` for preservation; transition to done/ awaits gate pass on CUDA host."
+    },
+    {
+      "at": "2026-05-11T03:10:00Z",
+      "from": "testing",
+      "to": "done",
+      "agent": "user-autonomous",
+      "note": "3/3 DSV4_HC_EXPAND passed on RTX 5090."
     }
   ],
-  "errors": []
+  "errors": [],
+  "merged_into": "feat/v4-port-cuda"
 }
