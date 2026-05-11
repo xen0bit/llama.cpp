@@ -4,7 +4,7 @@
 
 **Goal:** Implement CUDA for `ggml_dsv4_hc_expand`. Pass the `test_dsv4_hc_expand` cases from Stream A.
 
-**Architecture:** New `.cu`/`.cuh` pair. Kernel computes `out[i, hc, tok] = post[hc, tok] * block_out[i, hc, tok] + sum_{hc'} comb[hc, hc', tok] * residual[i, hc', tok]`. Per-thread one output element; each thread does an n_hc accumulation for the `comb @ residual` term.
+**Architecture:** New `.cu`/`.cuh` pair. Kernel computes `out[i, hc, tok] = post[hc, tok] * block_out[i, tok] + sum_{hc'} comb[hc, hc', tok] * residual[i, hc', tok]`. Note `block_out` is **2D** `{n_embd, n_tokens, 1, 1}` (no `hc` axis) per `ggml/src/ggml.c:6363-6366`. Per-thread one output element; each thread does an n_hc accumulation for the `comb @ residual` term.
 
 **Tech Stack:** CUDA C++, CMake.
 
@@ -51,18 +51,19 @@ Expected: PASSES via CPU fallback.
 - Metal dispatch `ggml-metal-ops.cpp:1488-1548` — 16 params total; lots of strides to track.
 - CPU ref `ggml-cpu/ops.cpp:11200+` — use to verify accumulation order.
 
-The shapes (from the public API and test_dsv4_hc_expand):
-- `block_out` [n_embd, n_hc, n_tokens]
-- `residual`  [n_embd, n_hc, n_tokens]
-- `post`      [n_hc, n_tokens]
-- `comb`      [n_hc, n_hc, n_tokens]      (the second n_hc index is `hc'`)
-- `out`       [n_embd, n_hc, n_tokens]
+The shapes (from `ggml/src/ggml.c:6363-6366` and `test_dsv4_hc_expand`):
+- `block_out` **2D** `{n_embd, n_tokens, 1, 1}` (no `hc` axis)
+- `residual`  3D `{n_embd, n_hc, n_tokens, 1}`
+- `post`      2D `{n_hc, n_tokens, 1, 1}`
+- `comb`      3D `{n_hc, n_hc, n_tokens, 1}`  (the second n_hc index is `hc'`)
+- `out`       3D `{n_embd, n_hc, n_tokens, 1}`
 
-Per-element math:
+Per-element math (matches CPU ref at `ggml-cpu/ops.cpp:11218-11231`):
 ```
-out[i_embd, i_hc, i_tok] = post[i_hc, i_tok] * block_out[i_embd, i_hc, i_tok]
+out[i_embd, i_hc, i_tok] = post[i_hc, i_tok] * block_out[i_embd, i_tok]
                          + sum_{hc'} comb[i_hc, hc', i_tok] * residual[i_embd, hc', i_tok]
 ```
+Note `block_out` is read once per `(i_embd, i_tok)` and reused across all `i_hc` for that token.
 
 ---
 
@@ -77,8 +78,15 @@ out[i_embd, i_hc, i_tok] = post[i_hc, i_tok] * block_out[i_embd, i_hc, i_tok]
 
 // V4 hyperconnection expand: per-token mix of block_out and residual.
 //
-// out[i, hc, tok] = post[hc, tok] * block_out[i, hc, tok]
+// out[i, hc, tok] = post[hc, tok] * block_out[i, tok]
 //                 + sum_{hc'} comb[hc, hc', tok] * residual[i, hc', tok]
+//
+// Shapes:
+//   block_out: 2D {n_embd, n_tokens}            -- no hc axis
+//   residual:  3D {n_embd, n_hc,    n_tokens}
+//   post:      2D {n_hc,  n_tokens}
+//   comb:      3D {n_hc,  n_hc,     n_tokens}
+//   dst:       3D {n_embd, n_hc,    n_tokens}
 //
 // Reference Metal kernel: ggml/src/ggml-metal/ggml-metal.metal:2247-2276
 // CPU reference:          ggml/src/ggml-cpu/ops.cpp:11200+
@@ -120,15 +128,15 @@ static __global__ void dsv4_hc_expand_f32(
         const float * __restrict__ comb,
         float       * __restrict__ dst,
         const int n_embd, const int n_hc, const int n_tokens,
-        // block_out strides
-        const int nb_b0, const int nb_b1, const int nb_b2,
-        // residual strides
+        // block_out strides (2D — no hc axis)
+        const int nb_b0, const int nb_b1,
+        // residual strides (3D)
         const int nb_r0, const int nb_r1, const int nb_r2,
         // post strides (2D)
         const int nb_p0, const int nb_p1,
         // comb strides (3D)
         const int nb_c0, const int nb_c1, const int nb_c2,
-        // dst strides
+        // dst strides (3D)
         const int nb0,   const int nb1,   const int nb2) {
     const int64_t gid = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     const int64_t total = (int64_t)n_embd * n_hc * n_tokens;
@@ -139,10 +147,10 @@ static __global__ void dsv4_hc_expand_f32(
     const int i_hc   = rest % n_hc;
     const int i_tok  = rest / n_hc;
 
-    // post * block_out
+    // post * block_out  (block_out is 2D: indexed by (i_embd, i_tok) only)
     const float p = *(const float *)((const char *)post + i_tok * nb_p1 + i_hc * nb_p0);
     const float b = *(const float *)((const char *)block_out
-        + i_tok * nb_b2 + i_hc * nb_b1 + i_embd * nb_b0);
+        + i_tok * nb_b1 + i_embd * nb_b0);
     float acc = p * b;
 
     // comb @ residual: sum over hc'
@@ -187,7 +195,7 @@ void ggml_cuda_op_dsv4_hc_expand(ggml_backend_cuda_context & ctx, ggml_tensor * 
         (const float *) comb->data,
         (float *)       dst->data,
         n_embd, n_hc, n_tokens,
-        (int) block_out->nb[0], (int) block_out->nb[1], (int) block_out->nb[2],
+        (int) block_out->nb[0], (int) block_out->nb[1],
         (int) residual->nb[0],  (int) residual->nb[1],  (int) residual->nb[2],
         (int) post->nb[0],      (int) post->nb[1],
         (int) comb->nb[0],      (int) comb->nb[1],      (int) comb->nb[2],
