@@ -23,6 +23,7 @@
 #include "ggml-cuda/diagmask.cuh"
 #include "ggml-cuda/diag.cuh"
 #include "ggml-cuda/dsv4-hc-split-sinkhorn.cuh"
+#include "ggml-cuda/dsv4-hc-weighted-sum.cuh"
 #include "ggml-cuda/dsv4-rope-tail.cuh"
 #include "ggml-cuda/fattn.cuh"
 #include "ggml-cuda/getrows.cuh"
@@ -2964,6 +2965,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_DSV4_HC_SPLIT_SINKHORN:
             ggml_cuda_op_dsv4_hc_split_sinkhorn(ctx, dst);
             break;
+        case GGML_OP_DSV4_HC_WEIGHTED_SUM:
+            ggml_cuda_op_dsv4_hc_weighted_sum(ctx, dst);
+            break;
         default:
             return false;
     }
@@ -5248,6 +5252,10 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                    op->src[1]->type == GGML_TYPE_F32 &&
                    op->src[2]->type == GGML_TYPE_F32 &&
                    op->type         == GGML_TYPE_F32;
+        case GGML_OP_DSV4_HC_WEIGHTED_SUM:
+            return op->type         == GGML_TYPE_F32
+                && op->src[0]->type == GGML_TYPE_F32
+                && op->src[1]->type == GGML_TYPE_F32;
 
         default:
             return false;
