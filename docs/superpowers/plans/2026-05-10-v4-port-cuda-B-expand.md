@@ -40,7 +40,7 @@ cmake --build build-cuda -j --target test-backend-ops 2>&1 | tail -5
 
 - [ ] **Step 1.3: Baseline**
 
-Run: `./build-cuda/bin/test-backend-ops -o DSV4_HC_EXPAND 2>&1 | tail -10`
+Run: `./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_HC_EXPAND 2>&1 | tail -10`
 Expected: PASSES via CPU fallback.
 
 ---
@@ -251,10 +251,18 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ## Task 6: Validate
 
-- [ ] **Step 6.1: Run test**
+- [ ] **Step 6.1: Run test with count assertion**
 
-Run: `./build-cuda/bin/test-backend-ops -o DSV4_HC_EXPAND 2>&1 | tail -30`
-Expected: PASSES within `max_nmse_err = 1e-4`.
+The harness reports success on `0/0` so SKIPPED/NOT_SUPPORTED would silently pass. Stream A registered **3 dsv4_hc_expand cases**.
+
+```bash
+./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_HC_EXPAND 2>&1 | tee /tmp/v4-cuda-B-expand-test.log | tail -30
+COUNT=$(grep -E "^\s+[0-9]+/[0-9]+ tests passed" /tmp/v4-cuda-B-expand-test.log | tail -1 | grep -oE "^\s+[0-9]+" | tr -d ' ')
+echo "Tests passed: ${COUNT:-0}"
+test "${COUNT:-0}" -ge 3 || { echo "FAIL: only ${COUNT:-0} of 3+ expected tests ran"; exit 1; }
+```
+
+Expected: tests PASS with `${COUNT:-0}` >= 3, CUDA vs CPU within `max_nmse_err = 1e-4`.
 
 Common failures:
 - Wrong index ordering for `comb`: the kernel reads `comb[i_hc, hc_p, i_tok]` not `comb[hc_p, i_hc, i_tok]`. Re-check Metal source — `comb` may be transposed relative to what the public API suggests.
@@ -262,7 +270,7 @@ Common failures:
 
 - [ ] **Step 6.2: compute-sanitizer**
 
-Run: `compute-sanitizer ./build-cuda/bin/test-backend-ops -o DSV4_HC_EXPAND 2>&1 | tail -20`
+Run: `compute-sanitizer ./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_HC_EXPAND 2>&1 | tail -20`
 
 ---
 

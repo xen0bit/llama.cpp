@@ -49,7 +49,7 @@ Expected: build succeeds. (test-backend-ops binary will be at `build-cuda/bin/te
 
 - [ ] **Step 1.4: Confirm baseline behavior**
 
-Run: `./build-cuda/bin/test-backend-ops -o DSV4_ROPE_TAIL 2>&1 | tail -20`
+Run: `./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_ROPE_TAIL 2>&1 | tail -20`
 Expected: test runs. Output likely PASSES because CUDA backend has no kernel → falls back to CPU → CPU vs CPU is trivially equal. The test becomes a real comparison once the CUDA kernel exists.
 
 ---
@@ -374,10 +374,18 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 **Files:** none (test execution)
 
-- [ ] **Step 7.1: Run the dsv4_rope_tail test on CUDA**
+- [ ] **Step 7.1: Run the dsv4_rope_tail test on CUDA with count assertion**
 
-Run: `./build-cuda/bin/test-backend-ops -o DSV4_ROPE_TAIL 2>&1 | tail -30`
-Expected: tests PASS on both CPU and CUDA backends. The CUDA results should match CPU within `max_nmse_err` (1e-4 per Stream A).
+The harness reports success on `0/0` (`tests/test-backend-ops.cpp:9310-9326`) so `SKIPPED`/`NOT_SUPPORTED` would silently pass otherwise. Pin the expected count: Stream A registered **5 dsv4_rope_tail cases** (4 from the inverse×ff loop + 1 NEOX edge). The harness runs each case per enabled backend.
+
+```bash
+./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_ROPE_TAIL 2>&1 | tee /tmp/v4-cuda-B-rope-tail-test.log | tail -30
+COUNT=$(grep -E "^\s+[0-9]+/[0-9]+ tests passed" /tmp/v4-cuda-B-rope-tail-test.log | tail -1 | grep -oE "^\s+[0-9]+" | tr -d ' ')
+echo "Tests passed: ${COUNT:-0}"
+test "${COUNT:-0}" -ge 5 || { echo "FAIL: only ${COUNT:-0} of 5+ expected tests ran (SKIPPED-counts-as-pass would mask this)"; exit 1; }
+```
+
+Expected: tests PASS on both CPU and CUDA backends with `${COUNT:-0}` >= 5. CUDA results must match CPU within `max_nmse_err` (1e-4 per Stream A).
 
 If FAIL with large numerical error (e.g., `nmse = 0.5`):
 - Common bug: index decomposition wrong → re-check `i0 / ne0 / ...` math against Metal source.
@@ -390,7 +398,7 @@ If FAIL with kernel launch error:
 
 - [ ] **Step 7.2: Run with compute-sanitizer if available**
 
-Run: `compute-sanitizer ./build-cuda/bin/test-backend-ops -o DSV4_ROPE_TAIL 2>&1 | tail -50` (if `compute-sanitizer` is in PATH; otherwise skip)
+Run: `compute-sanitizer ./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_ROPE_TAIL 2>&1 | tail -50` (if `compute-sanitizer` is in PATH; otherwise skip)
 Expected: no out-of-bounds reads, no uninitialized-memory accesses.
 
 - [ ] **Step 7.3: Run V4 gate-loader to confirm full architecture still loads**
@@ -444,7 +452,7 @@ This branch is ready to merge into `feat/v4-port-cuda`. The parent merger runs `
 - `ggml/src/ggml-cuda/dsv4-rope-tail.cu` and `.cuh` exist; kernel implements partial-RoPE matching the Metal reference.
 - Op registered via `case GGML_OP_DSV4_ROPE_TAIL` in `ggml-cuda.cu`.
 - CMakeLists includes the new `.cu` (or GLOB covers it).
-- `./build-cuda/bin/test-backend-ops -o DSV4_ROPE_TAIL` PASSES with CUDA backend numerically matching CPU within `max_nmse_err`.
+- `./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_ROPE_TAIL` PASSES with CUDA backend numerically matching CPU within `max_nmse_err`.
 - No files outside `ggml/src/ggml-cuda/` touched.
 - Branch `feat/v4-port-cuda-B-rope-tail` pushed.
 

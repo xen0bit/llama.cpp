@@ -46,7 +46,7 @@ Expected: at least one match. If empty, the CUDA toolkit is too old (need ≥11.
 
 - [ ] **Step 1.4: Baseline test**
 
-Run: `./build-cuda/bin/test-backend-ops -o DSV4_FP8_KV_QUANTIZE 2>&1 | tail -10`
+Run: `./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_FP8_KV_QUANTIZE 2>&1 | tail -10`
 Expected: PASSES via CPU fallback.
 
 ---
@@ -381,10 +381,18 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ## Task 7: Validate both paths
 
-- [ ] **Step 7.1: Run test on SM_89+ (native path)**
+- [ ] **Step 7.1: Run test on SM_89+ (native path) with count assertion**
 
-Run: `./build-cuda/bin/test-backend-ops -o DSV4_FP8_KV_QUANTIZE 2>&1 | tail -30`
-Expected: PASSES with `max_nmse_err = 1e-2`. CUDA result should match CPU result within FP8's representable precision.
+The harness reports success on `0/0` so SKIPPED/NOT_SUPPORTED would silently pass. Stream A registered **4 dsv4_fp8_kv_quantize cases**.
+
+```bash
+./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_FP8_KV_QUANTIZE 2>&1 | tee /tmp/v4-cuda-C-fp8-kv-test.log | tail -30
+COUNT=$(grep -E "^\s+[0-9]+/[0-9]+ tests passed" /tmp/v4-cuda-C-fp8-kv-test.log | tail -1 | grep -oE "^\s+[0-9]+" | tr -d ' ')
+echo "Tests passed: ${COUNT:-0}"
+test "${COUNT:-0}" -ge 4 || { echo "FAIL: only ${COUNT:-0} of 4+ expected tests ran"; exit 1; }
+```
+
+Expected: PASSES with `${COUNT:-0}` >= 4 and `max_nmse_err = 1e-2`. CUDA result matches CPU within FP8's representable precision.
 
 If FAIL with NMSE around 0.1-0.5:
 - Likely sign bit mishandling in the native path or wrong target FP8 format (E5M2 vs E4M3FN).
@@ -396,7 +404,7 @@ If FAIL with NMSE near 1.0:
 - [ ] **Step 7.2: Run test on SM_70 build (software path)**
 
 ```bash
-./build-cuda-sm70/bin/test-backend-ops -o DSV4_FP8_KV_QUANTIZE 2>&1 | tail -30
+./build-cuda-sm70/bin/test-backend-ops -b CPU,CUDA -o DSV4_FP8_KV_QUANTIZE 2>&1 | tail -30
 ```
 Expected: PASSES with the same tolerance. If the software path doesn't match the native path within ~1 ULP, debug the rounding logic.
 
@@ -405,7 +413,7 @@ Expected: PASSES with the same tolerance. If the software path doesn't match the
 - [ ] **Step 7.3: compute-sanitizer**
 
 ```bash
-compute-sanitizer ./build-cuda/bin/test-backend-ops -o DSV4_FP8_KV_QUANTIZE 2>&1 | tail -20
+compute-sanitizer ./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_FP8_KV_QUANTIZE 2>&1 | tail -20
 ```
 Expected: clean.
 

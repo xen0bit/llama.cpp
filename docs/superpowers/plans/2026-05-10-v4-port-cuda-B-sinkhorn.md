@@ -42,7 +42,7 @@ Expected: configures and builds successfully.
 
 - [ ] **Step 1.3: Baseline test run**
 
-Run: `./build-cuda/bin/test-backend-ops -o DSV4_HC_SPLIT_SINKHORN 2>&1 | tail -20`
+Run: `./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_HC_SPLIT_SINKHORN 2>&1 | tail -20`
 Expected: PASSES via CPU fallback. Becomes a real comparison once CUDA kernel registered.
 
 ---
@@ -354,10 +354,18 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ## Task 7: Validate against test-backend-ops
 
-- [ ] **Step 7.1: Run dsv4_hc_split_sinkhorn test on CUDA**
+- [ ] **Step 7.1: Run dsv4_hc_split_sinkhorn test on CUDA with count assertion**
 
-Run: `./build-cuda/bin/test-backend-ops -o DSV4_HC_SPLIT_SINKHORN 2>&1 | tail -30`
-Expected: tests PASS with CPU and CUDA matching within `max_nmse_err` (1e-3 per Stream A).
+The harness reports success on `0/0` so SKIPPED/NOT_SUPPORTED would silently pass. Stream A registered **4 dsv4_hc_split_sinkhorn cases**.
+
+```bash
+./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_HC_SPLIT_SINKHORN 2>&1 | tee /tmp/v4-cuda-B-sinkhorn-test.log | tail -30
+COUNT=$(grep -E "^\s+[0-9]+/[0-9]+ tests passed" /tmp/v4-cuda-B-sinkhorn-test.log | tail -1 | grep -oE "^\s+[0-9]+" | tr -d ' ')
+echo "Tests passed: ${COUNT:-0}"
+test "${COUNT:-0}" -ge 4 || { echo "FAIL: only ${COUNT:-0} of 4+ expected tests ran"; exit 1; }
+```
+
+Expected: tests PASS with `${COUNT:-0}` >= 4, CPU and CUDA matching within `max_nmse_err` (1e-3 per Stream A).
 
 Common failure modes:
 - Wrong index decomposition (Metal uses col-major, your CUDA might assume row-major) → re-check `nb01` vs `nb1` semantics.
@@ -366,7 +374,7 @@ Common failure modes:
 
 - [ ] **Step 7.2: Run with compute-sanitizer**
 
-If available: `compute-sanitizer ./build-cuda/bin/test-backend-ops -o DSV4_HC_SPLIT_SINKHORN 2>&1 | tail -20`
+If available: `compute-sanitizer ./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_HC_SPLIT_SINKHORN 2>&1 | tail -20`
 Expected: no warnings.
 
 - [ ] **Step 7.3: Commit any debugging fixes**
