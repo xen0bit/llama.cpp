@@ -1,7 +1,7 @@
 {
   "id": "v4-port-cuda-A-fixtures",
   "title": "test-backend-ops cases for 5 V4 ops (CUDA port Stream A)",
-  "state": "plan-review",
+  "state": "implementing",
   "branch": "feat/v4-port-cuda-A-fixtures",
   "parent_branch": "feat/v4-port-cuda",
   "spec_path": ".claude/agents/v4-port-cuda-A-fixtures.md",
@@ -58,6 +58,15 @@
       "agent": "user-autonomous",
       "note": "Per user's autonomous authorization (offline; wake only on hard blockers — these 3 round-2 findings are mechanical one-edit fixes per codex's own summary, not architectural). Plan revised to v3 by user-as-architect addressing all three round-2 findings: (1) added -b CPU to every test-backend-ops -o invocation and to the full-suite run in step 8.2 (7 invocations in total); (2) dropped the F16 test_dsv4_rope_tail registration with an inline comment explaining the Metal F32-only constraint at ggml-metal-device.m:1226; (3) Step 8.1 now pins expected count at 19 and asserts COUNT >= 19 via shell test, so SKIPPED-counts-as-pass cannot silently mask a no-op run. Review budget reset to 0 for a fresh codex round on v3.",
       "verdict": "v3-plan-written-autonomously"
+    },
+    {
+      "at": "2026-05-10T20:15:00Z",
+      "from": "plan-review",
+      "to": "implementing",
+      "agent": "codex",
+      "note": "Round 1 codex plan-review on v3 (high reasoning, sandbox=read-only). Codex re-verified every constraint live against ggml/src/ggml.c (sinkhorn mix_dim, weighted_sum, expand 2D block_out, fp8_kv n_rot/64, rope_tail), ggml/include/ggml.h public API, matches_filter exact-comma-separated semantics, max_nmse_err NMSE semantics, SKIPPED/NOT_SUPPORTED non-failure path, CPU-skipped-without-b-CPU path, and Metal F32-only constraint for DSV4_ROPE_TAIL at ggml-metal-device.m:1226. Count arithmetic verified: 4+1+4+3+3+4=19. Verdict APPROVE. No substantive blockers. Codex log at /tmp/codex-v4-cuda-A-r3.log. Proceeding to implementing state via builder sub-agent dispatch.",
+      "verdict": "APPROVE",
+      "review_round": 1
     }
   ],
   "errors": [
