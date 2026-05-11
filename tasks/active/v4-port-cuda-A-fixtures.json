@@ -1,7 +1,8 @@
 {
   "id": "v4-port-cuda-A-fixtures",
   "title": "test-backend-ops cases for 5 V4 ops (CUDA port Stream A)",
-  "state": "implementing",
+  "state": "done",
+  "merged_into": "feat/v4-port-cuda",
   "branch": "feat/v4-port-cuda-A-fixtures",
   "parent_branch": "feat/v4-port-cuda",
   "spec_path": ".claude/agents/v4-port-cuda-A-fixtures.md",
@@ -67,6 +68,29 @@
       "note": "Round 1 codex plan-review on v3 (high reasoning, sandbox=read-only). Codex re-verified every constraint live against ggml/src/ggml.c (sinkhorn mix_dim, weighted_sum, expand 2D block_out, fp8_kv n_rot/64, rope_tail), ggml/include/ggml.h public API, matches_filter exact-comma-separated semantics, max_nmse_err NMSE semantics, SKIPPED/NOT_SUPPORTED non-failure path, CPU-skipped-without-b-CPU path, and Metal F32-only constraint for DSV4_ROPE_TAIL at ggml-metal-device.m:1226. Count arithmetic verified: 4+1+4+3+3+4=19. Verdict APPROVE. No substantive blockers. Codex log at /tmp/codex-v4-cuda-A-r3.log. Proceeding to implementing state via builder sub-agent dispatch.",
       "verdict": "APPROVE",
       "review_round": 1
+    },
+    {
+      "at": "2026-05-10T20:45:00Z",
+      "from": "implementing",
+      "to": "code-review",
+      "agent": "orchestrator-builder",
+      "note": "Builder executed Tasks 1-8 of plan v3 task-by-task on isolated branch feat/v4-port-cuda-A-fixtures (off newly created parent feat/v4-port-cuda off feat/v4-port). Added 5 test_case structs (test_dsv4_rope_tail, test_dsv4_hc_split_sinkhorn, test_dsv4_hc_weighted_sum, test_dsv4_hc_expand, test_dsv4_fp8_kv_quantize) at tests/test-backend-ops.cpp line 4782+, and 19 registrations at line 8826+ in main(). CPU-only build (cmake -B build-cpu -DGGML_CUDA=OFF -DGGML_METAL=OFF) succeeded. ./build-cpu/bin/test-backend-ops -b CPU -o (5-op comma list) reported 19/19 tests passed. Full regression suite ./build-cpu/bin/test-backend-ops -b CPU reported 15293/15293 tests passed, no regressions. Branch pushed to remote mine. Commits: 95ca50d61 (task JSON state), 2d766b9e0 (all 5 structs + registrations)."
+    },
+    {
+      "at": "2026-05-10T20:55:00Z",
+      "from": "code-review",
+      "to": "testing",
+      "agent": "codex",
+      "note": "Round 1 codex code-review on diff (high reasoning, sandbox=read-only). Codex verified: all 5 test structs override max_nmse_err() not max_maa_err()/abs/rel; 19 registrations match expected 5+4+3+3+4 breakdown; shapes satisfy ggml.c assertions for sinkhorn (mix_dim=(2+n_hc)*n_hc), weighted_sum, expand (block_out 2D), fp8_kv ((ne[0]-n_rot)%64==0), and rope_tail; F16 rope_tail intentionally not registered; tests call public constructors without manual ggml_set_op_params*; live Metal supports_op check at ggml-metal-device.m:1226 inspected. Verdict APPROVE. Codex log at /tmp/codex-v4-cuda-A-cr.log.",
+      "verdict": "APPROVE",
+      "review_round": 1
+    },
+    {
+      "at": "2026-05-10T21:00:00Z",
+      "from": "testing",
+      "to": "done",
+      "agent": "orchestrator",
+      "note": "Step 8.1 gate enforced: COUNT=19 from /tmp/v4-cuda-A-task8-1.log, asserted COUNT >= 19 (PASS). Step 8.2 full-suite regression: 15293/15293 tests passed on CPU backend, no regressions. Fast-forward merge feat/v4-port-cuda-A-fixtures into feat/v4-port-cuda (no other streams have landed yet, so FF is clean). Pushed parent feat/v4-port-cuda to mine. Task moved to tasks/done/."
     }
   ],
   "errors": [
