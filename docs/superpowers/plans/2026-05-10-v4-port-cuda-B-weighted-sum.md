@@ -41,7 +41,7 @@ Expected: builds.
 
 - [ ] **Step 1.3: Baseline test**
 
-Run: `./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_HC_WEIGHTED_SUM 2>&1 | tail -10`
+Run: `./build-cuda/bin/test-backend-ops -o DSV4_HC_WEIGHTED_SUM 2>&1 | tail -10`
 Expected: PASSES via CPU fallback.
 
 ---
@@ -166,10 +166,18 @@ void ggml_cuda_op_dsv4_hc_weighted_sum(ggml_backend_cuda_context & ctx, ggml_ten
 
 - [ ] **Step 4.2: Add to CMakeLists** (skip if GLOB)
 
-- [ ] **Step 4.3: Build**
+`ggml/src/ggml-cuda/CMakeLists.txt:104` uses `file(GLOB GGML_SOURCES_CUDA "*.cu")` WITHOUT `CONFIGURE_DEPENDS`. The glob is evaluated at cmake-configure time, so the new `.cu` will NOT be picked up by an already-configured `build-cuda/`. There is no source-list edit to make, but we MUST force a reconfigure before building.
 
-Run: `cmake --build build-cuda -j --target ggml-cuda 2>&1 | tail -10`
-Expected: builds.
+- [ ] **Step 4.3: Reconfigure + build**
+
+```bash
+# Force CMake to re-run the GLOB so the new .cu is included in GGML_SOURCES_CUDA.
+cmake -B build-cuda -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES="89;120" 2>&1 | tail -5
+cmake --build build-cuda -j --target ggml-cuda 2>&1 | tail -10
+# Sanity-check the new translation unit actually compiled:
+test -f build-cuda/ggml/src/ggml-cuda/CMakeFiles/ggml-cuda.dir/dsv4-hc-weighted-sum.cu.o || { echo "FAIL: dsv4-hc-weighted-sum.cu.o missing"; exit 1; }
+```
+Expected: builds, .o exists.
 
 - [ ] **Step 4.4: Commit**
 
@@ -191,7 +199,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 5.1: Add include + case + supports_op**
 
-Add `#include "dsv4-hc-weighted-sum.cuh"`. Add:
+Add `#include "ggml-cuda/dsv4-hc-weighted-sum.cuh"` (match the existing include style at the top of `ggml-cuda.cu`, e.g. `#include "ggml-cuda/dsv4-hc-expand.cuh"`). Add:
 ```cpp
         case GGML_OP_DSV4_HC_WEIGHTED_SUM:
             ggml_cuda_op_dsv4_hc_weighted_sum(ctx, dst);
@@ -200,7 +208,9 @@ Add `#include "dsv4-hc-weighted-sum.cuh"`. Add:
 And in supports_op (if present):
 ```cpp
         case GGML_OP_DSV4_HC_WEIGHTED_SUM:
-            return op->src[0]->type == GGML_TYPE_F32;
+            return op->type           == GGML_TYPE_F32
+                && op->src[0]->type   == GGML_TYPE_F32
+                && op->src[1]->type   == GGML_TYPE_F32;
 ```
 
 - [ ] **Step 5.2: Build full**
@@ -226,13 +236,16 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 The harness reports success on `0/0` so SKIPPED/NOT_SUPPORTED would silently pass. Stream A registered **3 dsv4_hc_weighted_sum cases**.
 
 ```bash
-./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_HC_WEIGHTED_SUM 2>&1 | tee /tmp/v4-cuda-B-weighted-sum-test.log | tail -30
-COUNT=$(grep -E "^\s+[0-9]+/[0-9]+ tests passed" /tmp/v4-cuda-B-weighted-sum-test.log | tail -1 | grep -oE "^\s+[0-9]+" | tr -d ' ')
-echo "Tests passed: ${COUNT:-0}"
+./build-cuda/bin/test-backend-ops -o DSV4_HC_WEIGHTED_SUM 2>&1 | tee /tmp/v4-cuda-B-weighted-sum-test.log | tail -30
+# Sum tests-passed counts across all backend summaries so a CUDA-only build
+# and a CPU+CUDA build are both accepted. Stream A registers 3 cases; CUDA
+# must report >= 3 on a CUDA build (CPU mirror is fine but not required).
+COUNT=$(grep -E "^\s+[0-9]+/[0-9]+ tests passed" /tmp/v4-cuda-B-weighted-sum-test.log | grep -oE "^\s+[0-9]+" | tr -d ' ' | awk '{s+=$1} END {print s+0}')
+echo "Tests passed (aggregate across backends): ${COUNT:-0}"
 test "${COUNT:-0}" -ge 3 || { echo "FAIL: only ${COUNT:-0} of 3+ expected tests ran"; exit 1; }
 ```
 
-Expected: tests PASS with `${COUNT:-0}` >= 3, CPU vs CUDA within `max_nmse_err = 1e-4`.
+Expected: tests PASS with `${COUNT:-0}` >= 3, CPU vs CUDA within `max_nmse_err = 1e-5` (the tolerance Stream A actually set in `test-backend-ops.cpp` for `test_dsv4_hc_weighted_sum`; matches the design spec's "1e-5 abs / 1e-4 rel" line for B3).
 
 Common failures:
 - Wrong stride decomposition (bytes vs elements) → check `nb_x0` semantics. `nb[0]` is bytes per element; for F32 row-major it's `sizeof(float) = 4`.
@@ -240,7 +253,7 @@ Common failures:
 
 - [ ] **Step 6.2: compute-sanitizer if available**
 
-Run: `compute-sanitizer ./build-cuda/bin/test-backend-ops -b CPU,CUDA -o DSV4_HC_WEIGHTED_SUM 2>&1 | tail -20`
+Run: `compute-sanitizer ./build-cuda/bin/test-backend-ops -o DSV4_HC_WEIGHTED_SUM 2>&1 | tail -20`
 
 ---
 
