@@ -1,7 +1,7 @@
 {
   "id": "v4-port-cuda-C-fp8-kv",
   "title": "CUDA kernel for ggml_dsv4_fp8_kv_quantize, dual native+software path (V4 CUDA port Stream C)",
-  "state": "testing",
+  "state": "done",
   "branch": "feat/v4-port-cuda-C-fp8-kv",
   "parent_branch": "feat/v4-port-cuda",
   "spec_path": ".claude/agents/v4-port-cuda-C-fp8-kv.md",
@@ -24,7 +24,7 @@
       "from": "plan-review",
       "to": "planning",
       "agent": "codex-plan-review-r1",
-      "note": "REVISE: three blocking issues. (1) Algorithm wrong: plan round-tripped raw values through FP8, but CPU/Metal reference processes the prefix in 64-element blocks with per-block scale = exp2(ceil(log2(max(amax, 1e-4) / 448))), then quantize/dequantize clamp(v/scale, -448, 448) and multiply by scale. (2) -b CPU,CUDA still present at lines 49/389/407/416; harness uses strcmp at test-backend-ops.cpp:9882 — comma list silently no-ops, omitting -b is correct. (3) Innermost stride ignored: kernel decoded outer strides but indexed s[i0]/d[i0] as if nb00==sizeof(float). Plus non-blocking nits: tolerance text said 1e-2 (actual 1e-3 per test-backend-ops.cpp:5034), supports_op should check op->type too, AI co-author lines violate AGENTS.md."
+      "note": "REVISE: three blocking issues. (1) Algorithm wrong: plan round-tripped raw values through FP8, but CPU/Metal reference processes the prefix in 64-element blocks with per-block scale = exp2(ceil(log2(max(amax, 1e-4) / 448))), then quantize/dequantize clamp(v/scale, -448, 448) and multiply by scale. (2) -b CPU,CUDA still present at lines 49/389/407/416; harness uses strcmp at test-backend-ops.cpp:9882 \u2014 comma list silently no-ops, omitting -b is correct. (3) Innermost stride ignored: kernel decoded outer strides but indexed s[i0]/d[i0] as if nb00==sizeof(float). Plus non-blocking nits: tolerance text said 1e-2 (actual 1e-3 per test-backend-ops.cpp:5034), supports_op should check op->type too, AI co-author lines violate AGENTS.md."
     },
     {
       "at": "2026-05-10T23:00:00Z",
@@ -45,7 +45,7 @@
       "from": "planning",
       "to": "plan-review",
       "agent": "orchestrator",
-      "note": "Plan revised again: (A) explanatory note rephrased to avoid the literal '-b CPU,CUDA' string (now says '-b with a backend list'). (B) Combine step changed to single writer: 'if (warp_id == 0 && lane == 0)' — only one thread writes warp_max[0]. (C) Native path switched to NVIDIA's documented class wrapper: const __nv_fp8_e4m3 q(x); return float(q); — this is the supported public API and avoids the non-existent __nv_cvt_fp8_to_float. Prose references to the deprecated intrinsic pair updated to recommend the class wrapper."
+      "note": "Plan revised again: (A) explanatory note rephrased to avoid the literal '-b CPU,CUDA' string (now says '-b with a backend list'). (B) Combine step changed to single writer: 'if (warp_id == 0 && lane == 0)' \u2014 only one thread writes warp_max[0]. (C) Native path switched to NVIDIA's documented class wrapper: const __nv_fp8_e4m3 q(x); return float(q); \u2014 this is the supported public API and avoids the non-existent __nv_cvt_fp8_to_float. Prose references to the deprecated intrinsic pair updated to recommend the class wrapper."
     },
     {
       "at": "2026-05-11T00:00:00Z",
@@ -81,7 +81,15 @@
       "to": "testing",
       "agent": "orchestrator",
       "note": "Primary gate (./build-cuda/bin/test-backend-ops -o DSV4_FP8_KV_QUANTIZE, COUNT>=4) and secondary gate (-DCMAKE_CUDA_ARCHITECTURES=70 compile-only) cannot run from darwin/arm64 orchestrator host -- no nvcc. Same blocker hit by B-expand (see commit e020a8f91). Implementation pushed to mine; awaits CUDA host (RTX 6000 Ada SM_89 or RTX 5090 SM_120) to execute gates before fast-forward into feat/v4-port-cuda and move to tasks/done/."
+    },
+    {
+      "at": "2026-05-11T03:30:00Z",
+      "from": "testing",
+      "to": "done",
+      "agent": "user-autonomous",
+      "note": "4/4 DSV4_FP8_KV_QUANTIZE passed on RTX 5090 (native FP8 e4m3); SM_70 software-emulation path compiles cleanly under CUDA 12.8."
     }
   ],
-  "errors": []
+  "errors": [],
+  "merged_into": "feat/v4-port-cuda"
 }
