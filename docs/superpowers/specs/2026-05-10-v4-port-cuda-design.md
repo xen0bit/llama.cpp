@@ -242,9 +242,13 @@ list, which is identical across both backends.
     tests/v4-port/run-all-gates.sh
 ```
 
-CPU is the reference (not Metal) because: (a) bit-deterministic, (b)
-reproducible on any dev machine without an Apple device, (c) upstream
-maintainers can regenerate fixtures locally for review.
+CPU is the reference (not Metal). This matches upstream's `test-backend-ops`
+convention: per the [Backend Architecture wiki](https://deepwiki.com/ggml-org/llama.cpp/4.1-cpu-backend),
+the CPU backend serves as the canonical reference against which other
+backends are validated. Choosing CPU here gives us: (a) bit-deterministic
+output, (b) regeneration on any dev machine without an Apple device,
+(c) the same reference upstream maintainers already use to gate other
+backend ports.
 
 ## Error handling
 
@@ -292,18 +296,43 @@ Three layers, top-down:
 
 **Hardware fit for validation:**
 
-| Card | Whole-fit quants | Notes |
+| Card | Whole-fit quants | Partial-offload path |
 |---|---|---|
-| 1× RTX 6000 Ada (48 GB) | IQ1_S-XL, IQ1_M | Single-card validation; cleanest baseline |
-| 2× RTX 6000 Ada (96 GB row split) | + IQ1_M-XL, IQ2_XXS-XL, IQ2_XS-XL | Multi-card stress; optional |
-| RTX 5090 (32 GB) | none whole | Partial-offload only; secondary target |
+| 1× RTX 6000 Ada (48 GB) | IQ1_S-XL, IQ1_M | `-ngl N` for Q2_K-XL, Q4_K_M-XL, Q8_0 |
+| 2× RTX 6000 Ada (96 GB row split) | + IQ1_M-XL, IQ2_XXS-XL, IQ2_XS-XL | `-ngl N` for Q4_K_M-XL, Q8_0 |
+| RTX 5090 (32 GB) | none whole | `-ngl N` for everything |
+
+**Partial-offload validation is part of the acceptance bar, not a fallback.**
+Per the [TinyComputers analysis](https://tinycomputers.io/posts/partial-llm-loading-running-models-too-big-for-vram.html)
+and upstream behavior, `-ngl N` is bit-identical to full GPU inference: the
+same weights flow through the same computation; only the storage location
+changes. This means partial-offload runs exercise the new CUDA V4 ops on
+the offloaded layers exactly as if those layers had been wholly in VRAM,
+so we can validate the recommended-tier quants (Q4_K_M-XL, Q2_K-XL) and
+the Q8_0 baseline on hardware that can't hold them whole.
+
+**Required partial-offload runs** (added to the on-hardware validation session):
+
+| Quant | Hardware | `-ngl` | Why |
+|---|---|---|---|
+| Q4_K_M-XL | 1× RTX 6000 Ada | 16-24 (~30GB GPU) | Recommended quant; must validate on CUDA before declaring the port done |
+| Q8_0 | 2× RTX 6000 Ada (row split) | 24-32 | Reference baseline; exercises every V4 op at full precision |
+| IQ1_S-XL | 1× RTX 6000 Ada | 999 (full GPU) | Smallest whole-fit baseline; isolates whole-GPU correctness from partial-offload effects |
+
+Acceptance gate: gate-tools must pass on at least one partial-offload run
+(Q4_K_M-XL recommended). If it only passes on the whole-fit IQ1_S-XL run,
+that's evidence of a layer-boundary bug in our CUDA dispatch and blocks
+the port.
 
 ## Upstream-mergeability requirements
 
 This is the constraint shaping all the above. Concrete rules:
 
-- **Compute capability:** kernels compile on SM_70+. FP8 fast path gated behind
-  `__CUDA_ARCH__ >= 890`; software path covers everything else.
+- **Compute capability:** kernels compile on SM_70+ (Volta is the upstream
+  baseline per [`docs/build.md`](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md):
+  allowed `CMAKE_CUDA_ARCHITECTURES` values include sm_70, sm_72, sm_75,
+  sm_80, sm_86, sm_87, etc.). FP8 fast path gated behind `__CUDA_ARCH__ >= 890`;
+  software path covers everything else.
 - **Style:** match existing ggml-cuda conventions. .cu/.cuh pair per op,
   `static __global__` kernels, `ggml_cuda_op_*` dispatch naming, registry
   case in main switch. No new patterns invented.
@@ -328,8 +357,6 @@ This is the constraint shaping all the above. Concrete rules:
   no shared-memory micro-tuning beyond what the kernel naturally requires.
 - **Multi-GPU sharding tested as primary target.** Single-GPU (1× RTX 6000 Ada)
   is the validation baseline; multi-GPU is exercised opportunistically.
-- **Q4/Q8 quant validation on CUDA.** They don't fit in available CUDA memory;
-  the test session uses IQ-class quants.
 - **FP4 routed-expert support on CUDA.** Routed experts are already FP4 on
   the safetensors source; their CUDA dequant path is existing ggml-cuda work,
   unrelated to the 5 V4-specific ops.
