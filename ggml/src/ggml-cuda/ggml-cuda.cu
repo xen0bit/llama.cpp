@@ -22,6 +22,7 @@
 #include "ggml-cuda/cumsum.cuh"
 #include "ggml-cuda/diagmask.cuh"
 #include "ggml-cuda/diag.cuh"
+#include "ggml-cuda/dsv4-rope-tail.cuh"
 #include "ggml-cuda/fattn.cuh"
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
@@ -2869,6 +2870,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_ROPE_BACK:
             ggml_cuda_op_rope_back(ctx, dst);
             break;
+        case GGML_OP_DSV4_ROPE_TAIL:
+            ggml_cuda_op_dsv4_rope_tail(ctx, dst);
+            break;
         case GGML_OP_ROLL:
             ggml_cuda_op_roll(ctx, dst);
             break;
@@ -5161,6 +5165,23 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             return false;
         case GGML_OP_ROPE:
         case GGML_OP_ROPE_BACK: {
+            return op->src[0]->nb[0] == ggml_type_size(op->src[0]->type) && ggml_is_contiguous_2(op->src[0]);
+        }
+        case GGML_OP_DSV4_ROPE_TAIL: {
+            // Only F32 in/out is supported on this kernel (matches Metal kargs).
+            if (op->src[0]->type != GGML_TYPE_F32 || op->type != GGML_TYPE_F32) {
+                return false;
+            }
+            // Kernel implements mode == NORMAL (0) and mode == NEOX (2);
+            // any other mode is rejected so the framework falls back to CPU
+            // rather than producing wrong output. ggml/src/ggml.c:6426 ASSERTs
+            // this constraint at op-construction time, but we re-check here
+            // for defense-in-depth.
+            const int32_t mode = ggml_get_op_params_i32(op, 1);
+            if (mode != GGML_ROPE_TYPE_NORMAL && mode != GGML_ROPE_TYPE_NEOX) {
+                return false;
+            }
+            // Same contiguity requirement as GGML_OP_ROPE.
             return op->src[0]->nb[0] == ggml_type_size(op->src[0]->type) && ggml_is_contiguous_2(op->src[0]);
         }
         case GGML_OP_IM2COL:
