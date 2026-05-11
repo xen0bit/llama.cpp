@@ -754,14 +754,17 @@ static bool ggml_is_view_op(enum ggml_op op) {
 #endif
 
 #ifndef GGML_SCHED_MAX_SPLIT_INPUTS
-// Default upstream is 30. V4 (DeepSeek-V4) graphs blow past that when split
-// across multiple devices: hyperconnection inputs (block_out, residual, post,
-// comb) × n_layers, indexer/compressor state segments, multiple KV caches,
-// attention compressor inputs, etc. Single-device runs never trip this
-// because there's no split. Bumped to 128 here so multi-GPU V4 inference
-// works with default `-fit on` parameter fitting. Reported by drros@
-// (3× RTX PRO 4000 Blackwell, 72 GB combined VRAM).
-#define GGML_SCHED_MAX_SPLIT_INPUTS 128
+#define GGML_SCHED_MAX_SPLIT_INPUTS 30
+// V4 multi-GPU note: V4 (DeepSeek-V4) graphs need a higher value (~80-128)
+// when split across multiple devices, due to dense per-layer inputs
+// (hyperconnection × 4 + indexer/compressor state + multiple KV caches).
+// Single-device runs never trip the cap. The constant gates not just
+// `sched_split.inputs[N]` (small) but also `nodes_size` and
+// `context_buffer_size` allocations that scale as `graph_size × N` —
+// bumping the default would add ~200 MB per scheduler instance for V4-sized
+// graphs, paid even by single-GPU users who don't need it. Instead,
+// multi-GPU V4 users build with `-DGGML_SCHED_MAX_SPLIT_INPUTS=128`
+// (see README). Reported by drros@ on 3× RTX PRO 4000 Blackwell.
 #endif
 
 #ifndef GGML_SCHED_MAX_COPIES
