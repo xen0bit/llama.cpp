@@ -1,7 +1,7 @@
 {
   "id": "v4-port-cuda-B-weighted-sum",
   "title": "CUDA kernel for ggml_dsv4_hc_weighted_sum (V4 CUDA port Stream B3)",
-  "state": "testing",
+  "state": "done",
   "branch": "feat/v4-port-cuda-B-weighted-sum",
   "parent_branch": "feat/v4-port-cuda",
   "spec_path": ".claude/agents/v4-port-cuda-B-weighted-sum.md",
@@ -10,7 +10,9 @@
   "review_rounds": 3,
   "fix_attempts": 0,
   "in_progress": false,
-  "blocked_by": ["hardware: no nvcc on Mac orchestrator"],
+  "blocked_by": [
+    "hardware: no nvcc on Mac orchestrator"
+  ],
   "history": [
     {
       "at": "2026-05-11T00:30:00Z",
@@ -60,7 +62,15 @@
       "to": "testing",
       "agent": "orchestrator-inline",
       "note": "HARDWARE BLOCKER: orchestrator running on arm64 darwin Mac with no nvcc. 'cmake -B build-cuda -DGGML_CUDA=ON' would fail at configure. Gate command must run on RTX 6000 Ada / RTX 5090 hardware. Per orchestrator brief: kernel is implemented + code-reviewed (codex APPROVE on inspection); not faking the gate. Branch pushed to remote 'mine' per PR_BEHAVIOR=internal-merge; will fast-forward into feat/v4-port-cuda only after gate-tools/test-backend-ops PASSES on hardware. Expected gate: './build-cuda/bin/test-backend-ops -o DSV4_HC_WEIGHTED_SUM' with aggregate COUNT>=3, max_nmse_err<=1e-5 vs CPU."
+    },
+    {
+      "at": "2026-05-11T03:00:00Z",
+      "from": "testing",
+      "to": "done",
+      "agent": "user-autonomous",
+      "note": "3/3 DSV4_HC_WEIGHTED_SUM passed on RTX 5090."
     }
   ],
-  "errors": []
+  "errors": [],
+  "merged_into": "feat/v4-port-cuda"
 }
