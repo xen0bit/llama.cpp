@@ -1349,7 +1349,19 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
 
                 if (n_comp_visible > 0) {
                     ggml_tensor * kv_comp_cache = dsv4_cache_view_3d(ctx0, mctx_dsv4->get_dsv4_attn_k(ctx0, il, seq_id), n_comp_visible);
-                    k_all = ggml_concat(ctx0, k_raw, kv_comp_cache, 2);
+                    // V4's KV cache is F16 (forced via llama-model.cpp); CUDA's
+                    // ggml_concat asserts F32 (ggml-cuda/concat.cu) — every other
+                    // architecture's concat takes F32 inputs from mul_mat/norm/rope,
+                    // so the assertion is correct. Cast both F16 inputs to F32 for
+                    // the concat, then cast the result back to F16 to preserve the
+                    // f16-KV-pin invariant for downstream attention. Metal's concat
+                    // is type-agnostic; on Metal these casts are accepted but the
+                    // intermediate F32 round-trip is wasted work. CPU concat handles
+                    // both types so it's also a no-op cost there.
+                    ggml_tensor * k_raw_f32   = ggml_cast(ctx0, k_raw,   GGML_TYPE_F32);
+                    ggml_tensor * comp_f32    = ggml_cast(ctx0, kv_comp_cache, GGML_TYPE_F32);
+                    ggml_tensor * concat_f32  = ggml_concat(ctx0, k_raw_f32, comp_f32, 2);
+                    k_all = ggml_cast(ctx0, concat_f32, GGML_TYPE_F16);
                     v_all = k_all;
 
                     ggml_tensor * comp_mask = nullptr;
