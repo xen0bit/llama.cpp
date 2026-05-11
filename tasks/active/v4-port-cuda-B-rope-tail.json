@@ -1,13 +1,13 @@
 {
   "id": "v4-port-cuda-B-rope-tail",
   "title": "CUDA kernel for ggml_dsv4_rope_tail (V4 CUDA port Stream B1)",
-  "state": "plan-review",
+  "state": "implementing",
   "branch": "feat/v4-port-cuda-B-rope-tail",
   "parent_branch": "feat/v4-port-cuda",
   "spec_path": ".claude/agents/v4-port-cuda-B-rope-tail.md",
   "plan_path": "docs/superpowers/plans/2026-05-10-v4-port-cuda-B-rope-tail.md",
   "design_spec_path": "docs/superpowers/specs/2026-05-10-v4-port-cuda-design.md",
-  "review_rounds": 0,
+  "review_rounds": 2,
   "fix_attempts": 0,
   "in_progress": false,
   "blocked_by": [],
@@ -18,6 +18,27 @@
       "to": "plan-review",
       "agent": "user-autonomous",
       "note": "Plan + spec pre-written via brainstorming + writing-plans skills. Stream A merged; Stream B1 is now unblocked. Plan pre-fixed with Stream A lessons learned (-b CPU,CUDA flag + count assertion). Starting at plan-review for codex independent review on the pre-fixed plan."
+    },
+    {
+      "at": "2026-05-10T00:00:00Z",
+      "from": "plan-review",
+      "to": "planning",
+      "agent": "codex-plan-review",
+      "note": "Codex round 1: REVISE. Pre-applied fixes (-b CPU,CUDA + COUNT>=5) confirmed correct, BUT 3 real technical blockers found: (1) op_params layout in plan Step 4.1 swaps inverse and floats vs Metal dispatch at ggml-metal-ops.cpp:1606-1623 — inverse is at slot 3, floats at slots 4-9; (2) plan implements NORMAL pair rotation only but Stream A test_cases include a NEOX edge case (test-backend-ops.cpp:8836-8838) and Metal kernel has separate is_neox branch at metal:4943-4967; (3) YaRN helper in plan omits corr_dims/n_ctx_orig/beta_fast/beta_slow — needs to use the existing CUDA rope_yarn pattern from rope.cu:22-41 with ggml_rope_yarn_corr_dims. Workflow blocker #4 (AGENTS.md AI commit policy) noted but does not apply at internal-merge stage. Revising plan to address technical blockers."
+    },
+    {
+      "at": "2026-05-10T00:30:00Z",
+      "from": "planning",
+      "to": "plan-review",
+      "agent": "orchestrator",
+      "note": "Plan revisions applied: (1) op_params extraction in Step 4.1 dispatch now reads i32[0..3] (n_dims, mode, n_ctx_orig, inverse) + f32[4..9] via memcpy, matching Metal dispatch verbatim; (2) Step 5.2 kernel body now has both is_neox and NORMAL branches, line-for-line port of metal:4943-4990; (3) Step 4.1 helper rewritten as dsv4_rope_yarn<bool forward>(...) with rope_corr_dims struct, matching ggml-cuda/rope.cu:22-41; ggml_rope_yarn_corr_dims called host-side in dispatch. Step 6.3 supports_op insertion specified precisely with mode filter (mode∈{0,2}) and contiguity check. Step 8.2 push target changed origin→mine."
+    },
+    {
+      "at": "2026-05-10T01:00:00Z",
+      "from": "plan-review",
+      "to": "implementing",
+      "agent": "codex-plan-review",
+      "note": "Codex round 2: APPROVE. 'The revised plan now matches the Metal dispatch and kernel semantics for dsv4_rope_tail: op_params layout, launch shape, NEOX vs NORMAL rotation, inverse handling, freq_factors indexing, and YaRN corr_dims all line up with the local references. The CUDA registration/supports_op plan is scoped correctly, the test gate uses -b CPU,CUDA with a count assertion, and the expected diff stays under ggml/src/ggml-cuda/.' Proceeding to dispatch builder sub-agent."
     }
   ],
   "errors": []

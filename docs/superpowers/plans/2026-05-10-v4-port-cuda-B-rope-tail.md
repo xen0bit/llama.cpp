@@ -128,39 +128,79 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 
 ```cpp
 #include "dsv4-rope-tail.cuh"
+#include "ggml.h"           // for ggml_rope_yarn_corr_dims
+#include <algorithm>        // std::min / std::max in dispatch
 
-// Helper: RoPE frequency computation (theta scaling, Yarn ext_factor).
-// Translates the corresponding portion of ggml-metal.metal:4906-4997.
-static __device__ __forceinline__ float rope_yarn_freq(
-        float theta_base, float freq_scale, float ext_factor, float attn_factor,
-        int i0, int n_dims) {
-    // TODO: copy the yarn ramp formula from rope.cu / Metal reference verbatim.
-    // Identical math; only the host-side wrapping differs.
-    (void) theta_base; (void) freq_scale; (void) ext_factor;
-    (void) attn_factor; (void) i0; (void) n_dims;
-    return 0.0f;
+// YaRN helper: matches the existing CUDA rope_yarn pattern at
+// ggml/src/ggml-cuda/rope.cu:22-41. Reuses rope_corr_dims (computed
+// host-side via ggml_rope_yarn_corr_dims) and rope_yarn_ramp.
+// Output: cos_theta/sin_theta both scaled by mscale (attn_factor adjusted).
+//
+// Translates the same math as ggml-metal.metal:4906-4997's call to
+// rope_yarn(theta/freq_factor, freq_scale, corr_dims, rel_i0, ext_factor,
+// attn_factor, &cos_theta, &sin_theta).
+//
+// Implementation note: rope.cu's rope_yarn is already a template<bool forward>
+// device function. Stream B1 may either (a) #include the relevant helpers
+// from rope.cuh (if exposed) and reuse them, OR (b) duplicate the small
+// rope_yarn_ramp + rope_yarn body verbatim into dsv4-rope-tail.cu. Option (b)
+// is preferred to avoid coupling Stream B1 to changes in rope.cuh; the
+// duplication is ~15 lines and keeps the kernel self-contained.
+
+struct rope_corr_dims {
+    float v[2];
+};
+
+static __device__ __forceinline__ float dsv4_rope_yarn_ramp(
+        const float low, const float high, const int i0) {
+    const float y = (i0 / 2 - low) / max(0.001f, high - low);
+    return 1.0f - min(1.0f, max(0.0f, y));
 }
 
-// Main kernel: one thread per output element. Element offset and index logic
-// follows the Metal kernel at ggml-metal.metal:4906-4997.
-static __global__ void dsv4_rope_tail_f32(
+// forward=true: standard rotation; forward=false: inverse (sin flipped).
+template<bool forward>
+static __device__ __forceinline__ void dsv4_rope_yarn(
+        const float theta_extrap, const float freq_scale,
+        const rope_corr_dims corr_dims, const int i0,
+        const float ext_factor, float mscale,
+        float & cos_theta, float & sin_theta) {
+    float theta_interp = freq_scale * theta_extrap;
+    float theta = theta_interp;
+    if (ext_factor != 0.0f) {
+        const float ramp_mix = dsv4_rope_yarn_ramp(corr_dims.v[0], corr_dims.v[1], i0) * ext_factor;
+        theta = theta_interp * (1.0f - ramp_mix) + theta_extrap * ramp_mix;
+        mscale *= 1.0f + 0.1f * logf(1.0f / freq_scale);
+    }
+    cos_theta = cosf(theta) * mscale;
+    sin_theta = sinf(theta) * mscale;
+    if (!forward) {
+        sin_theta = -sin_theta;
+    }
+}
+
+// Main kernel: launch shape mirrors Metal — grid = (ne01, ne02, ne03),
+// block.x walks the ne00 dim. This matches ggml-metal.metal:4906-4997's
+// dispatch pattern (tgpig = (i1, i2, i3); tid loops over ne00).
+//
+// Template params:
+//   is_neox    — NEOX layout (rotate (j0, j0+n_half)) vs NORMAL adjacent-pair.
+//   forward    — false flips sin sign (inverse RoPE).
+//   has_ff     — whether freq_factors src2 is present.
+static __global__ void dsv4_rope_tail_f32_kernel(
         const float * __restrict__ src0,
         const int   * __restrict__ pos,
         const float * __restrict__ freq_factors,
         float       * __restrict__ dst,
-        const int    ne0, const int ne1, const int ne2, const int ne3,
+        const int    ne00,
         const int    nb00, const int nb01, const int nb02, const int nb03,
         const int    nb0,  const int nb1,  const int nb2,  const int nb3,
-        const int    n_dims, const int mode, const int n_ctx_orig,
+        const int    n_dims,
         const float  freq_base, const float freq_scale,
         const float  ext_factor, const float attn_factor,
-        const float  beta_fast, const float beta_slow,
-        const bool   inverse) {
-    // TODO: translate ggml-metal.metal:4906-4997 to CUDA semantics.
-    // Indexing: gid = blockIdx.x * blockDim.x + threadIdx.x;
-    // Decompose to (i0, i1, i2, i3) using ne0..ne3 strides.
-    // If i0 < ne0 - n_dims: pass through (dst[...] = src0[...])
-    // Else: rotate (x_pair, x_pair+1) using theta from pos[i2] and freq_factors.
+        const rope_corr_dims corr_dims,
+        const bool   is_neox, const bool inverse) {
+    // See Step 5.2 for the body. Indexing pattern follows the Metal
+    // reference at ggml-metal.metal:4906-4997.
 }
 
 void ggml_cuda_op_dsv4_rope_tail(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -172,38 +212,66 @@ void ggml_cuda_op_dsv4_rope_tail(ggml_backend_cuda_context & ctx, ggml_tensor * 
     GGML_ASSERT(dst->type  == GGML_TYPE_F32);
     GGML_ASSERT(pos->type  == GGML_TYPE_I32);
 
-    const int n_dims      = ggml_get_op_params_i32(dst, 0);
-    const int mode        = ggml_get_op_params_i32(dst, 1);
-    const int n_ctx_orig  = ggml_get_op_params_i32(dst, 2);
-    const float freq_base   = ggml_get_op_params_f32(dst, 3);
-    const float freq_scale  = ggml_get_op_params_f32(dst, 4);
-    const float ext_factor  = ggml_get_op_params_f32(dst, 5);
-    const float attn_factor = ggml_get_op_params_f32(dst, 6);
-    const float beta_fast   = ggml_get_op_params_f32(dst, 7);
-    const float beta_slow   = ggml_get_op_params_f32(dst, 8);
-    const int   inverse_i   = ggml_get_op_params_i32(dst, 9);
-    const bool  inverse     = inverse_i != 0;
+    // op_params layout — MUST match the Metal dispatch in
+    // ggml/src/ggml-metal/ggml-metal-ops.cpp:1606-1623 verbatim:
+    //   [0] = n_dims      (i32)
+    //   [1] = mode        (i32)
+    //   [2] = n_ctx_orig  (i32)
+    //   [3] = inverse     (i32, treated as bool)
+    //   [4] = freq_base   (f32)
+    //   [5] = freq_scale  (f32)
+    //   [6] = ext_factor  (f32)
+    //   [7] = attn_factor (f32)
+    //   [8] = beta_fast   (f32)
+    //   [9] = beta_slow   (f32)
+    const int32_t n_dims     = ggml_get_op_params_i32(dst, 0);
+    const int32_t mode       = ggml_get_op_params_i32(dst, 1);
+    const int32_t n_ctx_orig = ggml_get_op_params_i32(dst, 2);
+    const int32_t inverse_i  = ggml_get_op_params_i32(dst, 3);
+    const bool    inverse    = inverse_i != 0;
 
-    // (Verify the op_params indices against the Metal dispatch at
-    //  ggml-metal-ops.cpp:1596-1673 before relying on these.)
+    float freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow;
+    memcpy(&freq_base,   (const int32_t *) dst->op_params + 4, sizeof(float));
+    memcpy(&freq_scale,  (const int32_t *) dst->op_params + 5, sizeof(float));
+    memcpy(&ext_factor,  (const int32_t *) dst->op_params + 6, sizeof(float));
+    memcpy(&attn_factor, (const int32_t *) dst->op_params + 7, sizeof(float));
+    memcpy(&beta_fast,   (const int32_t *) dst->op_params + 8, sizeof(float));
+    memcpy(&beta_slow,   (const int32_t *) dst->op_params + 9, sizeof(float));
 
-    const int64_t n_total = ggml_nelements(dst);
-    constexpr int blk = 256;
-    const dim3 grid((n_total + blk - 1) / blk);
-    const dim3 block(blk);
+    const bool is_neox = (mode == 2);  // GGML_ROPE_TYPE_NEOX
+
+    // Precompute corr_dims host-side (matches Metal's rope_yarn_corr_dims
+    // call at ggml-metal.metal:4927). The CUDA equivalent is exposed in
+    // ggml.c as ggml_rope_yarn_corr_dims.
+    rope_corr_dims corr_dims;
+    ggml_rope_yarn_corr_dims(n_dims, n_ctx_orig, freq_base, beta_fast, beta_slow, corr_dims.v);
+
+    // Launch shape: grid = (ne01, ne02, ne03); block.x walks ne00.
+    // Mirrors the Metal launch at ggml-metal-ops.cpp:1670
+    // (dispatch_threadgroups(enc, ne01, ne02, ne03, nth, 1, 1) with
+    //  nth = min(256, ne00)).
+    const int ne00 = (int) src0->ne[0];
+    const int ne01 = (int) src0->ne[1];
+    const int ne02 = (int) src0->ne[2];
+    const int ne03 = (int) src0->ne[3];
+
+    const int nth = std::min(256, std::max(1, ne00));
+    const dim3 grid(ne01, ne02, ne03);
+    const dim3 block(nth, 1, 1);
 
     cudaStream_t stream = ctx.stream();
-    dsv4_rope_tail_f32<<<grid, block, 0, stream>>>(
+    dsv4_rope_tail_f32_kernel<<<grid, block, 0, stream>>>(
         (const float *) src0->data,
         (const int *)   pos->data,
         ff ? (const float *) ff->data : nullptr,
         (float *)       dst->data,
-        (int) src0->ne[0], (int) src0->ne[1], (int) src0->ne[2], (int) src0->ne[3],
+        ne00,
         (int) src0->nb[0], (int) src0->nb[1], (int) src0->nb[2], (int) src0->nb[3],
         (int) dst->nb[0],  (int) dst->nb[1],  (int) dst->nb[2],  (int) dst->nb[3],
-        n_dims, mode, n_ctx_orig,
+        n_dims,
         freq_base, freq_scale, ext_factor, attn_factor,
-        beta_fast, beta_slow, inverse);
+        corr_dims,
+        is_neox, inverse);
 
     CUDA_CHECK(cudaGetLastError());
 }
@@ -237,72 +305,107 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 **Files:**
 - Modify: `ggml/src/ggml-cuda/dsv4-rope-tail.cu`
 
-- [ ] **Step 5.1: Implement rope_yarn_freq**
+- [ ] **Step 5.1: Implement the YaRN helper (already declared in Step 4.1)**
 
-Open `ggml/src/ggml-cuda/rope.cu` and locate the existing `rope_yarn` device function. Copy the Yarn-ramp computation verbatim (ramp from `beta_fast` to `beta_slow`, interpolate between linear and NTK-aware scaling). Adapt the function signature to match the helper declared in Step 4.1.
+The helper signature was finalized in Step 4.1 as a template
+`dsv4_rope_yarn<bool forward>(theta_extrap, freq_scale, corr_dims, i0,
+ext_factor, mscale, &cos_theta, &sin_theta)`. Its body (also in Step 4.1)
+is a direct port of the CUDA `rope_yarn` at `ggml/src/ggml-cuda/rope.cu:22-41`
+and matches Metal's call at `ggml-metal.metal:4956` / `4979` line-for-line.
 
-Reference math (also in Metal kernel lines 4906-4997):
+No additional implementation work needed in this step — verify the
+function body from Step 4.1 against `rope.cu:22-41`:
 ```
-ramp = clamp((|i0/2 - beta_low| / max(beta_high - beta_low, 0.001)), 0.0, 1.0)
-theta_interp = theta_base * freq_scale
-theta_extrap = theta_base
-theta_blend = mix(theta_interp, theta_extrap, ramp) * attn_factor (when ext_factor != 0)
+ramp = clamp((i0/2 - corr_dims.v[0]) / max(corr_dims.v[1] - corr_dims.v[0], 0.001), 0, 1)
+ramp_mix = (1 - ramp) * ext_factor      // (note: rope_yarn_ramp returns 1 - ramp)
+theta_interp = freq_scale * theta_extrap
+theta_blend = theta_interp * (1 - ramp_mix) + theta_extrap * ramp_mix   (when ext_factor != 0)
+mscale *= 1 + 0.1 * log(1/freq_scale)                                    (when ext_factor != 0)
+cos_theta = cos(theta_blend) * mscale; sin_theta = sin(theta_blend) * mscale
+if (!forward) sin_theta = -sin_theta
 ```
 
 - [ ] **Step 5.2: Implement the main kernel body**
 
-Within `dsv4_rope_tail_f32`, replace the TODO with the indexing + rotation logic. Direct translation of `kernel_dsv4_rope_tail_f32` in Metal source:
+Translate `kernel_dsv4_rope_tail_f32` from `ggml-metal.metal:4906-4997`
+line-for-line. Two branches: `is_neox` and the default NORMAL.
 
 ```cpp
-const int64_t gid = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
-if (gid >= (int64_t)ne0 * ne1 * ne2 * ne3) return;
+const int i1 = blockIdx.x;
+const int i2 = blockIdx.y;
+const int i3 = blockIdx.z;
+const int tid = threadIdx.x;
+const int ntg = blockDim.x;
 
-// Decompose linear index to (i0, i1, i2, i3)
-const int i0 = gid % ne0;
-const int rest1 = gid / ne0;
-const int i1 = rest1 % ne1;
-const int rest2 = rest1 / ne1;
-const int i2 = rest2 % ne2;
-const int i3 = rest2 / ne2;
+const int n_nope = ne00 - n_dims;
+if (n_nope < 0) return;
 
-const int prefix = ne0 - n_dims;
+const float theta_base_pos = (float) pos[i2];
+const float inv_ndims = -1.0f / (float) n_dims;
 
-const float * src_ptr = (const float *)((const char *)src0
-    + i3*nb03 + i2*nb02 + i1*nb01);
-float * dst_ptr = (float *)((char *)dst
-    + i3*nb3 + i2*nb2 + i1*nb1);
+const char * src_base = (const char *) src0 + i3*nb03 + i2*nb02 + i1*nb01;
+char       * dst_base = (char *)       dst  + i3*nb3  + i2*nb2  + i1*nb1;
 
-if (i0 < prefix) {
-    // Non-RoPE prefix: pass through.
-    dst_ptr[i0] = src_ptr[i0];
-    return;
+for (int i0 = tid; i0 < ne00; i0 += ntg) {
+    // Pass-through prefix.
+    if (i0 < n_nope) {
+        *((float *)(dst_base + i0*nb0)) = *((const float *)(src_base + i0*nb00));
+        continue;
+    }
+
+    const int r = i0 - n_nope;
+
+    if (is_neox) {
+        const int n_half = n_dims / 2;
+        if (r >= n_half) continue;
+
+        const int ic = r;
+        const int rel_i0 = 2 * ic;
+        const float theta = theta_base_pos * powf(freq_base, inv_ndims * (float) rel_i0);
+        const float freq_factor = freq_factors ? freq_factors[ic] : 1.0f;
+
+        float cos_theta, sin_theta;
+        // Use the forward template; inverse is applied below as a sign flip
+        // on sin_theta (matches Metal's "if (args.inverse) sin_theta = -sin_theta").
+        dsv4_rope_yarn<true>(theta / freq_factor, freq_scale, corr_dims,
+                             rel_i0, ext_factor, attn_factor,
+                             cos_theta, sin_theta);
+        if (inverse) sin_theta = -sin_theta;
+
+        const int j0 = n_nope + ic;
+        const int j1 = n_nope + ic + n_half;
+        const float x0 = *((const float *)(src_base + j0*nb00));
+        const float x1 = *((const float *)(src_base + j1*nb00));
+        *((float *)(dst_base + j0*nb0)) = x0*cos_theta - x1*sin_theta;
+        *((float *)(dst_base + j1*nb0)) = x0*sin_theta + x1*cos_theta;
+    } else {
+        if ((r & 1) != 0) continue;
+
+        const int ic = r / 2;
+        const float theta = theta_base_pos * powf(freq_base, inv_ndims * (float) r);
+        const float freq_factor = freq_factors ? freq_factors[ic] : 1.0f;
+
+        float cos_theta, sin_theta;
+        dsv4_rope_yarn<true>(theta / freq_factor, freq_scale, corr_dims,
+                             r, ext_factor, attn_factor,
+                             cos_theta, sin_theta);
+        if (inverse) sin_theta = -sin_theta;
+
+        const int j0 = n_nope + r;
+        const int j1 = j0 + 1;
+        const float x0 = *((const float *)(src_base + j0*nb00));
+        const float x1 = *((const float *)(src_base + j1*nb00));
+        *((float *)(dst_base + j0*nb0)) = x0*cos_theta - x1*sin_theta;
+        *((float *)(dst_base + j1*nb0)) = x0*sin_theta + x1*cos_theta;
+    }
 }
-
-// RoPE tail: rotate pairs (x0, x1) at indices (prefix + 2k, prefix + 2k + 1).
-const int j = i0 - prefix;       // index within the rotated tail
-if (j & 1) return;               // each thread handles a pair; odd indices skipped
-
-const int i_pair = j / 2;
-const int pos_i  = pos[i2];
-
-// Compute theta using Yarn helper (or vanilla NTK if ext_factor == 0).
-float theta_base = (float)pos_i * powf(freq_base, -((float)(2*i_pair)) / (float)n_dims);
-if (ff) {
-    theta_base = theta_base / ff[i_pair];
-}
-const float theta = rope_yarn_freq(theta_base, freq_scale, ext_factor,
-                                   attn_factor, 2*i_pair, n_dims);
-
-float cos_th, sin_th;
-sincosf(inverse ? -theta : theta, &sin_th, &cos_th);
-
-const float x0 = src_ptr[i0];
-const float x1 = src_ptr[i0 + 1];
-dst_ptr[i0]     = x0 * cos_th - x1 * sin_th;
-dst_ptr[i0 + 1] = x0 * sin_th + x1 * cos_th;
 ```
 
-(Cross-check the index decomposition and indices against the Metal kernel before relying on this. The Metal kernel may use a slightly different launch shape — adapt the thread-to-element mapping to match.)
+Cross-check against the Metal kernel at `ggml-metal.metal:4906-4997`:
+the index variables (`i1, i2, i3, tid, ntg, n_nope, r, ic, rel_i0, j0, j1`)
+and pointer math (`src_base + i0*nb00`, `dst_base + i0*nb0`) are the
+direct translation. The only difference is CUDA's `__global__` + `blockIdx`
+in place of Metal's `kernel void` + `tgpig` — same semantics.
 
 - [ ] **Step 5.3: Build CUDA**
 
@@ -337,9 +440,9 @@ Near the top of `ggml-cuda.cu`, where other op headers are included (search for 
 #include "dsv4-rope-tail.cuh"
 ```
 
-- [ ] **Step 6.2: Add the registry case**
+- [ ] **Step 6.2: Add the registry case in `ggml_cuda_compute_forward`**
 
-In the main `switch` inside `ggml_cuda_compute_forward` (or whichever function handles op-to-kernel dispatch — find via `grep -n "case GGML_OP_ROPE:" ggml/src/ggml-cuda/ggml-cuda.cu`), insert:
+Locate the main op-dispatch switch (around line 2866 — search for `case GGML_OP_ROPE:` in `ggml_cuda_compute_forward`). Insert:
 
 ```cpp
         case GGML_OP_DSV4_ROPE_TAIL:
@@ -347,12 +450,27 @@ In the main `switch` inside `ggml_cuda_compute_forward` (or whichever function h
             break;
 ```
 
-Insert it alphabetically-adjacent to other DSV4 ops if any exist already; otherwise place it near the existing ROPE case.
+Place it adjacent to the existing `GGML_OP_ROPE` case (alphabetical-by-DSV4 ordering can be deferred to later streams).
 
-- [ ] **Step 6.3: Also add to ggml_backend_cuda_supports_op (if present)**
+- [ ] **Step 6.3: Add to `ggml_backend_cuda_device_supports_op`**
 
-Run: `grep -n "GGML_OP_ROPE" ggml/src/ggml-cuda/ggml-cuda.cu | head -10`
-For each location the GGML_OP_ROPE case appears in a "supports_op"-style switch (where backends advertise which ops they support), add a corresponding `case GGML_OP_DSV4_ROPE_TAIL: return true;` (or `return ...` with the appropriate predicate matching how ROPE handles its support check).
+The supports-op switch lives in `ggml_backend_cuda_device_supports_op` at `ggml/src/ggml-cuda/ggml-cuda.cu:4842`. Locate the `GGML_OP_ROPE` / `GGML_OP_ROPE_BACK` case (around line 5162-5165) that returns a contiguity predicate. Insert immediately after that case:
+
+```cpp
+        case GGML_OP_DSV4_ROPE_TAIL: {
+            // Kernel supports mode == 0 (NORMAL) and mode == 2 (NEOX). Other
+            // modes are not exercised by V4 and would silently produce wrong
+            // output; refuse them so the framework falls back to CPU.
+            const int32_t mode = ggml_get_op_params_i32(op, 1);
+            if (mode != 0 && mode != 2) return false;
+            // Same contiguity requirement as GGML_OP_ROPE.
+            return op->src[0]->type == GGML_TYPE_F32
+                && op->src[0]->nb[0] == ggml_type_size(op->src[0]->type)
+                && ggml_is_contiguous_2(op->src[0]);
+        }
+```
+
+Do NOT add `GGML_OP_DSV4_ROPE_TAIL` to the `get_op_batch_size` switch at line 5234 — V4's row layout for this op matches the default `ggml_nrows(op)` semantics, so omitting it is correct.
 
 - [ ] **Step 6.4: Build full CUDA**
 
@@ -435,15 +553,17 @@ Expected diff:
 
 If anything outside these is touched, fix it (likely accidental from debugging).
 
-- [ ] **Step 8.2: Push branch**
+- [ ] **Step 8.2: Push branch (internal-merge workflow)**
 
 ```bash
-git push -u origin feat/v4-port-cuda-B-rope-tail
+git push -u mine feat/v4-port-cuda-B-rope-tail
 ```
+
+This pushes to remote `mine` (the personal fork at `github.com/cchuter/llama.cpp`). The upstream `origin` (`ggml-org/llama.cpp`) is read-only at this stage — per `AGENTS.md:88-92`, automated pushes to upstream are prohibited; the final upstream PR is a separate, human-driven step after all 5 streams merge.
 
 - [ ] **Step 8.3: Note for parent merger**
 
-This branch is ready to merge into `feat/v4-port-cuda`. The parent merger runs `gate-loader.sh` after the merge to confirm the build still produces a V4-capable binary.
+This branch is ready to fast-forward into `feat/v4-port-cuda`. The orchestrator's testing-phase gate runs `gate-loader.sh` after the merge to confirm the build still produces a V4-capable binary.
 
 ---
 
