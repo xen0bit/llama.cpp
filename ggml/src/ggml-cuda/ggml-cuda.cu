@@ -5058,8 +5058,17 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_host_buffer_type(
 static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
 
-    // split buffers can only be used with GGML_OP_MUL_MAT
-    if (op->op != GGML_OP_MUL_MAT) {
+    // split buffers can only be used with GGML_OP_MUL_MAT and DeepSeek V4 custom ops.
+    // Without the DSV4 exception, multi-GPU scheduler rejects the V4 ops once their
+    // weight tensors land in cuda_split buffers and falls back to CPU — which then
+    // corrupts data via host<->device transfer mismatches and crashes during decode.
+    // Reported and root-caused by @DenisVASI9 on an 8x A100 40GB rig.
+    if (op->op != GGML_OP_MUL_MAT &&
+        op->op != GGML_OP_DSV4_HC_SPLIT_SINKHORN &&
+        op->op != GGML_OP_DSV4_HC_WEIGHTED_SUM &&
+        op->op != GGML_OP_DSV4_HC_EXPAND &&
+        op->op != GGML_OP_DSV4_FP8_KV_QUANTIZE &&
+        op->op != GGML_OP_DSV4_ROPE_TAIL) {
         for (int i = 0; i < GGML_MAX_SRC; i++) {
             if (op->src[i] && op->src[i]->buffer && ggml_backend_buft_is_cuda_split(op->src[i]->buffer->buft)) {
                 return false;
