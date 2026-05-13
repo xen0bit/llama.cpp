@@ -3279,14 +3279,28 @@ static bool ggml_backend_cuda_cpy_tensor_async(ggml_backend_t backend_src, ggml_
 #else
             if (dsv4_debug_enabled()) {
                 fprintf(stderr, "[DSV4_DEBUG] peer-copy: src_dev=%d dst_dev=%d bytes=%zu "
-                                "src=%s(%s,op=%s) dst=%s(%s,op=%s) src_ptr=%p dst_ptr=%p\n",
+                                "src=%s(%s,op=%s,buft=%s) dst=%s(%s,op=%s,buft=%s) src_ptr=%p dst_ptr=%p\n",
                         cuda_ctx_src->device, cuda_ctx_dst->device, ggml_nbytes(dst),
                         src->name, ggml_type_name(src->type), ggml_op_name(src->op),
+                        src->buffer ? ggml_backend_buft_name(src->buffer->buft) : "?",
                         dst->name, ggml_type_name(dst->type), ggml_op_name(dst->op),
+                        dst->buffer ? ggml_backend_buft_name(dst->buffer->buft) : "?",
                         src->data, dst->data);
                 fflush(stderr);
+                // Force any deferred CUDA error to surface BEFORE the next op, so the log line
+                // immediately above truly identifies the failing copy (codex review nit #1).
+                cudaError_t pre_err = cudaGetLastError();
+                if (pre_err != cudaSuccess) {
+                    fprintf(stderr, "[DSV4_DEBUG] pre-copy stale error: %s\n", cudaGetErrorString(pre_err));
+                    fflush(stderr);
+                }
             }
             CUDA_CHECK(cudaMemcpyPeerAsync(dst->data, cuda_ctx_dst->device, src->data, cuda_ctx_src->device, ggml_nbytes(dst), cuda_ctx_src->stream()));
+            if (dsv4_debug_enabled()) {
+                // Synchronous wait to force the async error (if any) to surface at the offending copy,
+                // not at some later API call. Heavy perturbation — only with GGML_DSV4_DEBUG=1.
+                CUDA_CHECK(cudaStreamSynchronize(cuda_ctx_src->stream()));
+            }
 #endif // GGML_CUDA_NO_PEER_COPY
         }
 
