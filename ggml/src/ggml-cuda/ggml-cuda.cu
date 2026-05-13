@@ -2783,7 +2783,52 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
         nb1, nb2, nb3, stream);
 }
 
+// ---------- DSV4 debug logging (env-gated, set GGML_DSV4_DEBUG=1 to enable) ----------
+static bool dsv4_debug_enabled() {
+    static const bool enabled = (getenv("GGML_DSV4_DEBUG") != nullptr);
+    return enabled;
+}
+
+static const char * dsv4_op_short(enum ggml_op op) {
+    switch (op) {
+        case GGML_OP_DSV4_ROPE_TAIL:         return "DSV4_ROPE_TAIL";
+        case GGML_OP_DSV4_HC_SPLIT_SINKHORN: return "DSV4_HC_SPLIT_SINKHORN";
+        case GGML_OP_DSV4_HC_WEIGHTED_SUM:   return "DSV4_HC_WEIGHTED_SUM";
+        case GGML_OP_DSV4_HC_EXPAND:         return "DSV4_HC_EXPAND";
+        case GGML_OP_DSV4_FP8_KV_QUANTIZE:   return "DSV4_FP8_KV_QUANTIZE";
+        default:                              return nullptr;
+    }
+}
+
+static bool dsv4_op_is_v4(enum ggml_op op) {
+    return dsv4_op_short(op) != nullptr;
+}
+
+static void dsv4_log_op_entry(int device, const struct ggml_tensor * dst) {
+    if (!dsv4_debug_enabled() || !dsv4_op_is_v4(dst->op)) return;
+    fprintf(stderr, "[DSV4_DEBUG] dev=%d op=%s dst=%s(%s) shape=[%lld,%lld,%lld,%lld]\n",
+            device, dsv4_op_short(dst->op),
+            dst->name, ggml_type_name(dst->type),
+            (long long) dst->ne[0], (long long) dst->ne[1],
+            (long long) dst->ne[2], (long long) dst->ne[3]);
+    for (int i = 0; i < GGML_MAX_SRC; i++) {
+        if (!dst->src[i]) continue;
+        const char * buft_name = "(null-buf)";
+        int is_split = 0;
+        if (dst->src[i]->buffer) {
+            buft_name = ggml_backend_buft_name(dst->src[i]->buffer->buft);
+            is_split  = ggml_backend_buft_is_cuda_split(dst->src[i]->buffer->buft) ? 1 : 0;
+        }
+        fprintf(stderr, "[DSV4_DEBUG]   src[%d]=%s(%s) buft=%s split=%d data=%p extra=%p\n",
+                i, dst->src[i]->name, ggml_type_name(dst->src[i]->type),
+                buft_name, is_split, dst->src[i]->data, (void *) dst->src[i]->extra);
+    }
+    fflush(stderr);
+}
+// ---------- end DSV4 debug ----------
+
 static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct ggml_tensor * dst) {
+    dsv4_log_op_entry(ctx.device, dst);
     switch (dst->op) {
         case GGML_OP_ARGMAX:
             ggml_cuda_argmax(ctx, dst);
@@ -3232,6 +3277,15 @@ static bool ggml_backend_cuda_cpy_tensor_async(ggml_backend_t backend_src, ggml_
 #ifdef GGML_CUDA_NO_PEER_COPY
             return false;
 #else
+            if (dsv4_debug_enabled()) {
+                fprintf(stderr, "[DSV4_DEBUG] peer-copy: src_dev=%d dst_dev=%d bytes=%zu "
+                                "src=%s(%s,op=%s) dst=%s(%s,op=%s) src_ptr=%p dst_ptr=%p\n",
+                        cuda_ctx_src->device, cuda_ctx_dst->device, ggml_nbytes(dst),
+                        src->name, ggml_type_name(src->type), ggml_op_name(src->op),
+                        dst->name, ggml_type_name(dst->type), ggml_op_name(dst->op),
+                        src->data, dst->data);
+                fflush(stderr);
+            }
             CUDA_CHECK(cudaMemcpyPeerAsync(dst->data, cuda_ctx_dst->device, src->data, cuda_ctx_src->device, ggml_nbytes(dst), cuda_ctx_src->stream()));
 #endif // GGML_CUDA_NO_PEER_COPY
         }
