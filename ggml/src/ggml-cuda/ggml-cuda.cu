@@ -2715,6 +2715,13 @@ static bool ggml_cuda_mul_mat_id_split_fast(
     const int cc = ggml_cuda_info().devices[ctx.device].cc;
     if (dst->ne[2] > (int64_t) get_mmvq_mmid_max_batch(src0->type, cc)) return false;
 
+    // [TAG_MMID_SPLIT_FAST_PATH] Codex round-1 blocker: mirror the gather
+    // fallback's Tier-1/full-cover view checks. Otherwise a non-full-cover or
+    // offset view could take the fast path and read the wrong slab.
+    if (!ggml_is_contiguous(src0)) return false;
+    if (ggml_nbytes(src0) != ggml_nbytes(root)) return false;
+    if (src0->type != root->type) return false;
+
     // ne01 = rows per expert (in root coordinates). For V4's wo_a_g this is
     // o_lora_rank. We need row_low/row_high in root flat-row coords to land
     // on whole-expert boundaries.
@@ -2728,7 +2735,8 @@ static bool ggml_cuda_mul_mat_id_split_fast(
 
     // Per-device expert ranges (whole-expert aligned check)
     struct dev_range { int64_t expert_low; int64_t expert_high; };
-    std::vector<dev_range> ranges(n_devices, {0, 0});
+    dev_range ranges[GGML_CUDA_MAX_DEVICES];
+    for (int id = 0; id < GGML_CUDA_MAX_DEVICES; ++id) { ranges[id].expert_low = ranges[id].expert_high = 0; }
     int n_active = 0;
 
     for (int id = 0; id < n_devices; ++id) {
@@ -2742,7 +2750,7 @@ static bool ggml_cuda_mul_mat_id_split_fast(
         ++n_active;
     }
     if (n_active == 0) return false;
-    if (n_active == 1) return false; // single-device row-split → gather is just as fast
+    if (n_active == 1) return false; // single-device row-split: gather is just as fast
 
     static int trace = -1;
     if (trace < 0) {
@@ -2775,14 +2783,15 @@ static bool ggml_cuda_mul_mat_id_split_fast(
     CUDA_CHECK(cudaEventCreateWithFlags(&ctx_ready, cudaEventDisableTiming));
     CUDA_CHECK(cudaEventRecord(ctx_ready, ctx.stream()));
 
-    // Per-device temp dst (full shape, zero-init). One per device that's not ctx.device.
-    struct dev_state {
-        ggml_cuda_pool_alloc<char> dst_temp;
-        ggml_cuda_pool_alloc<char> src1_copy;
-        ggml_cuda_pool_alloc<char> ids_copy;
-        cudaEvent_t done = nullptr;
-    };
-    std::vector<dev_state> devs(n_devices);
+    // Per-device pool_allocs and events. Use fixed-size arrays because
+    // ggml_cuda_pool_alloc has deleted move/copy ctors (cannot live in
+    // std::vector::resize). Same pattern as the existing ggml_cuda_op_mul_mat
+    // dev_data array at line ~1912.
+    ggml_cuda_pool_alloc<char> dst_temp_alloc[GGML_CUDA_MAX_DEVICES];
+    ggml_cuda_pool_alloc<char> src1_copy_alloc[GGML_CUDA_MAX_DEVICES];
+    ggml_cuda_pool_alloc<char> ids_copy_alloc[GGML_CUDA_MAX_DEVICES];
+    cudaEvent_t copy_done_events[GGML_CUDA_MAX_DEVICES] = {nullptr};
+    char * dst_temp_ptrs[GGML_CUDA_MAX_DEVICES] = {nullptr};
 
     const size_t src1_bytes = ggml_nbytes(src1);
     const size_t ids_bytes  = ggml_nbytes(ids);
@@ -2802,9 +2811,10 @@ static bool ggml_cuda_mul_mat_id_split_fast(
         // devices write to a local temp that we'll peer-copy + add.
         float * dst_local = dst_main;
         if (id != ctx.device) {
-            char * p = devs[id].dst_temp.alloc(ctx.pool(id), dst_bytes);
+            char * p = dst_temp_alloc[id].alloc(ctx.pool(id), dst_bytes);
             CUDA_CHECK(cudaMemsetAsync(p, 0, dst_bytes, s));
             dst_local = (float *) p;
+            dst_temp_ptrs[id] = p;
         }
 
         // src1 and ids on device id (peer-copy if needed). For ctx.device the
@@ -2814,13 +2824,13 @@ static bool ggml_cuda_mul_mat_id_split_fast(
         ggml_tensor src1_local_storage;
         ggml_tensor ids_local_storage;
         if (id != ctx.device) {
-            char * p_s1 = devs[id].src1_copy.alloc(ctx.pool(id), src1_bytes);
+            char * p_s1 = src1_copy_alloc[id].alloc(ctx.pool(id), src1_bytes);
             CUDA_CHECK(cudaMemcpyPeerAsync(p_s1, id, src1->data, ctx.device, src1_bytes, s));
             src1_local_storage = *src1;
             src1_local_storage.data = p_s1;
             src1_dev = &src1_local_storage;
 
-            char * p_id = devs[id].ids_copy.alloc(ctx.pool(id), ids_bytes);
+            char * p_id = ids_copy_alloc[id].alloc(ctx.pool(id), ids_bytes);
             CUDA_CHECK(cudaMemcpyPeerAsync(p_id, id, ids->data, ctx.device, ids_bytes, s));
             ids_local_storage = *ids;
             ids_local_storage.data = p_id;
@@ -2832,7 +2842,7 @@ static bool ggml_cuda_mul_mat_id_split_fast(
         //
         // Keep src0_local.buffer = the original cuda_split buffer. The impl
         // only reads ggml_backend_buffer_get_usage() (USAGE_WEIGHTS for split
-        // buffers, so the COMPUTE padding-clear branch is skipped — important
+        // buffers, so the COMPUTE padding-clear branch is skipped: important
         // because src0_local.data points to a different device's memory than
         // ctx.device, and we must not cudaMemsetAsync into a peer slab from
         // ctx.stream(). Inside the impl, src0_local.data is just a pointer.
@@ -2850,43 +2860,64 @@ static bool ggml_cuda_mul_mat_id_split_fast(
             ctx, &src0_local, src1_dev, ids_dev, dst,
             s, ctx.pool(id), (id == ctx.device) ? nullptr : (void *) dst_local,
             (uint32_t) ranges[id].expert_low, (uint32_t) ranges[id].expert_high);
-
-        // Record completion event so the main device can wait + aggregate.
-        if (id != ctx.device) {
-            CUDA_CHECK(cudaEventCreateWithFlags(&devs[id].done, cudaEventDisableTiming));
-            CUDA_CHECK(cudaEventRecord(devs[id].done, s));
-        }
+        // No need for a separate "kernel done" event: the peer-copy below is
+        // enqueued on the SAME peer stream `s`, so the peer-copy is FIFO-
+        // ordered after the kernel automatically.
     }
 
-    // Aggregate on ctx.device: for each non-main device, peer-copy its temp
-    // to ctx.device scratch then add into dst_main.
+    // Aggregate on ctx.device. For each non-main device:
+    //   1. Allocate a per-device scratch on ctx.pool() — separate buffers per
+    //      peer so each peer-copy writes to its own scratch (no inter-peer
+    //      WAW races on a shared scratch buffer).
+    //   2. Enqueue the peer-copy on the PEER stream (so the peer pool's
+    //      stream-bound allocator covers the temp read; the existing
+    //      ggml_cuda_op_mul_mat split path uses the same convention).
+    //   3. Record copy_done_events[id] on the peer stream.
+    //   4. ctx.stream() waits on copy_done_events[id] before the add kernel.
+    //
+    // [Codex round-1 blocker fix] The previous version enqueued peer-copy on
+    // ctx.stream() and reused a single scratch. The peer pool's reuse logic
+    // is bound to the peer stream and was unaware of the main-stream read,
+    // so a later launch on the peer stream could clobber the temp before the
+    // copy finished. The fix enqueues peer-copies on peer streams (matching
+    // the convention in ggml_cuda_op_mul_mat) and uses per-device scratches.
     ggml_cuda_set_device(ctx.device);
-    ggml_cuda_pool_alloc<char> agg_scratch(ctx.pool());
-    char * scratch = nullptr;
+    ggml_cuda_pool_alloc<char> agg_scratch_alloc[GGML_CUDA_MAX_DEVICES];
     for (int id = 0; id < n_devices; ++id) {
         if (id == ctx.device) continue;
         if (ranges[id].expert_low == ranges[id].expert_high) continue;
 
-        // Wait on the per-device kernel
-        CUDA_CHECK(cudaStreamWaitEvent(ctx.stream(), devs[id].done, 0));
-
-        if (scratch == nullptr) {
-            scratch = agg_scratch.alloc(dst_bytes);
-        }
-        // Peer-copy the temp to ctx.device scratch, then add into dst_main.
+        char * scratch = agg_scratch_alloc[id].alloc(ctx.pool(), dst_bytes);
+        // Enqueue peer-copy on the peer stream (matches ggml_cuda_op_mul_mat
+        // convention; the peer pool's stream-bound reuse covers the read).
+        cudaStream_t peer_stream = ctx.stream(id, 0);
         CUDA_CHECK(cudaMemcpyPeerAsync(scratch, ctx.device,
-                                       devs[id].dst_temp.get(), id,
-                                       dst_bytes, ctx.stream()));
+                                       dst_temp_ptrs[id], id,
+                                       dst_bytes, peer_stream));
+        // Record copy-done on peer stream; ctx.stream() waits on it before
+        // the add kernel reads scratch on ctx.device.
+        CUDA_CHECK(cudaEventCreateWithFlags(&copy_done_events[id], cudaEventDisableTiming));
+        CUDA_CHECK(cudaEventRecord(copy_done_events[id], peer_stream));
+
+        CUDA_CHECK(cudaStreamWaitEvent(ctx.stream(), copy_done_events[id], 0));
         mmid_split_add_into(dst_main, (const float *) scratch, dst_nelem, ctx.stream());
     }
 
-    // Cleanup events
+    // Cleanup events. cudaEventDestroy is safe even if the event is still in
+    // flight: it marks the event for destruction once the device's work
+    // completes.
     CUDA_CHECK(cudaEventDestroy(ctx_ready));
     for (int id = 0; id < n_devices; ++id) {
-        if (devs[id].done) {
-            CUDA_CHECK(cudaEventDestroy(devs[id].done));
-        }
+        if (copy_done_events[id]) CUDA_CHECK(cudaEventDestroy(copy_done_events[id]));
     }
+    // pool_alloc dtors run here, returning memory to their per-device pools.
+    // Safe because:
+    //   - Peer-side temps (dst_temp/src1_copy/ids_copy): all reads/writes
+    //     happened on peer stream; the peer pool's FIFO ordering ensures the
+    //     next caller on peer stream waits for them.
+    //   - ctx-side scratch (agg_scratch_alloc): final reads on ctx.stream()
+    //     by the add kernel; the ctx pool's FIFO ordering covers the next
+    //     caller on ctx.stream().
     return true;
 }
 
