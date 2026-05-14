@@ -2657,7 +2657,89 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
     GGML_ASSERT(src1->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type  == GGML_TYPE_F32);
-    GGML_ASSERT(!ggml_backend_buft_is_cuda_split(src0->buffer->buft) && "mul_mat_id does not support split buffers");
+
+    // Tier-C cuda_split fallback for MUL_MAT_ID: gather per-device slabs of src0
+    // onto ctx.device into a contiguous temp buffer, then run the non-split path
+    // on that copy. This preserves correctness without rewriting the kernel for
+    // split semantics. Used by DeepSeek V4's dsv4_grouped_out where wo_a_g is a
+    // Tier-1 view of a cuda_split wo_a.
+    //
+    // Layout note: cuda_split partitions by ggml_nrows (the flat ne[1]*ne[2]*ne[3]
+    // row count). For wo_a_g = [group_dim, o_lora_rank, n_groups], flat rows =
+    // o_lora_rank * n_groups. Each device owns [row_low, row_high) of those flat
+    // rows; concatenating them by id reconstructs the original contiguous storage
+    // because Tier-1 views preserve nb[1] (row stride) of the root.
+    ggml_cuda_pool_alloc<char> src0_gathered_pool(ctx.pool());
+    ggml_tensor src0_gathered_storage;
+    if (ggml_backend_buft_is_cuda_split(src0->buffer->buft)) {
+        const ggml_tensor * root = src0;
+        while (root->view_src) {
+            root = root->view_src;
+        }
+        GGML_ASSERT(root->extra != nullptr && "split src0 root must have extra populated");
+        GGML_ASSERT(ggml_is_contiguous(src0) &&
+            "MUL_MAT_ID split fallback requires contiguous src0 (Tier-1 view)");
+
+        ggml_backend_cuda_split_buffer_type_context * buft_ctx =
+            (ggml_backend_cuda_split_buffer_type_context *) src0->buffer->buft->context;
+        ggml_tensor_extra_gpu * src0_extra = (ggml_tensor_extra_gpu *) root->extra;
+
+        const size_t total_bytes = ggml_nbytes(src0);
+        const int64_t ne0 = src0->ne[0];
+        const size_t nb1 = src0->nb[1];
+
+        // pad row width to MATRIX_ROW_PADDING just as the split buffer does, so
+        // downstream quantized-mul kernels that read past the last logical row
+        // hit zero-padded memory rather than uninitialized data
+        size_t alloc_bytes = total_bytes;
+        if (ne0 % MATRIX_ROW_PADDING != 0) {
+            alloc_bytes += ggml_row_size(src0->type, MATRIX_ROW_PADDING - ne0 % MATRIX_ROW_PADDING);
+        }
+
+        ggml_cuda_set_device(ctx.device);
+        char * gathered = src0_gathered_pool.alloc(alloc_bytes);
+        // zero the padding tail to avoid NaNs in quantized blocks
+        if (alloc_bytes > total_bytes) {
+            CUDA_CHECK(cudaMemsetAsync(gathered + total_bytes, 0, alloc_bytes - total_bytes, ctx.stream()));
+        }
+
+        for (int id = 0; id < ggml_backend_cuda_get_device_count(); ++id) {
+            int64_t row_low, row_high;
+            get_row_split(&row_low, &row_high, root, buft_ctx->tensor_split, id);
+            const int64_t nrows_split = row_high - row_low;
+            if (nrows_split == 0) {
+                continue;
+            }
+            const size_t offset_split = row_low * nb1;
+            const size_t copy_bytes   = ggml_nbytes_split(src0, nrows_split);
+
+            if (id == ctx.device) {
+                CUDA_CHECK(cudaMemcpyAsync(gathered + offset_split,
+                                           src0_extra->data_device[id],
+                                           copy_bytes,
+                                           cudaMemcpyDeviceToDevice,
+                                           ctx.stream()));
+            } else {
+                CUDA_CHECK(cudaMemcpyPeerAsync(gathered + offset_split, ctx.device,
+                                               src0_extra->data_device[id], id,
+                                               copy_bytes,
+                                               ctx.stream()));
+            }
+        }
+        // synchronize so the gathered buffer is ready before the kernels read it
+        CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
+
+        // build a non-split clone of src0's metadata pointing at gathered storage
+        src0_gathered_storage = *src0;
+        src0_gathered_storage.buffer   = dst->buffer; // a non-split CUDA buffer on ctx.device
+        src0_gathered_storage.data     = gathered;
+        src0_gathered_storage.extra    = nullptr;
+        src0_gathered_storage.view_src = nullptr;
+        src0_gathered_storage.view_offs = 0;
+        src0 = &src0_gathered_storage;
+    } else {
+        GGML_ASSERT(!ggml_backend_buft_is_cuda_split(src0->buffer->buft));
+    }
 
     GGML_TENSOR_BINARY_OP_LOCALS
 
@@ -5164,10 +5246,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
     // Reported and root-caused by @DenisVASI9 on an 8x A100 40GB rig.
     //
     // The metadata-op additions unblock --split-mode row at model load for V4
-    // (dsv4_grouped_out reshapes attn_output_a.weight before mul_mat_id). Note
-    // that mul_mat_id itself still asserts non-split (ggml-cuda.cu:2635), so
-    // full row-split inference for V4 requires separate kernel-level work.
+    // (dsv4_grouped_out reshapes attn_output_a.weight before mul_mat_id).
+    // MUL_MAT_ID handles split src0 via an internal gather-to-main-device
+    // fallback (ggml_cuda_mul_mat_id at ggml-cuda.cu:2653+); the dispatch may
+    // run on any device because the kernel itself relocates the data.
     if (op->op != GGML_OP_MUL_MAT &&
+        op->op != GGML_OP_MUL_MAT_ID &&
         op->op != GGML_OP_RESHAPE &&
         op->op != GGML_OP_VIEW &&
         op->op != GGML_OP_PERMUTE &&
@@ -5269,17 +5353,22 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 struct ggml_tensor * a = op->src[0];
                 struct ggml_tensor * b = op->src[1];
                 if (a->buffer && ggml_backend_buft_is_cuda_split(a->buffer->buft)) {
-                    if (a->ne[2] > 1 || a->ne[3] > 1) {
-                        return false;
-                    }
-                    // for small weight matrices the active device can end up without any rows, don't use row split in those cases
-                    // this avoids some edge cases (and the performance would not be good anyways)
-                    ggml_backend_cuda_split_buffer_type_context * buft_ctx = (ggml_backend_cuda_split_buffer_type_context *) a->buffer->buft->context;
-                    int64_t row_low;
-                    int64_t row_high;
-                    get_row_split(&row_low, &row_high, a, buft_ctx->tensor_split, dev_ctx->device);
-                    if (row_low == row_high) {
-                        return false;
+                    // MUL_MAT_ID handles split src0 via an in-kernel gather fallback;
+                    // it tolerates ne[2] > 1 (per-expert slabs) and zero-row devices
+                    // (the gather covers all device row ranges, including empty ones).
+                    if (op->op == GGML_OP_MUL_MAT) {
+                        if (a->ne[2] > 1 || a->ne[3] > 1) {
+                            return false;
+                        }
+                        // for small weight matrices the active device can end up without any rows, don't use row split in those cases
+                        // this avoids some edge cases (and the performance would not be good anyways)
+                        ggml_backend_cuda_split_buffer_type_context * buft_ctx = (ggml_backend_cuda_split_buffer_type_context *) a->buffer->buft->context;
+                        int64_t row_low;
+                        int64_t row_high;
+                        get_row_split(&row_low, &row_high, a, buft_ctx->tensor_split, dev_ctx->device);
+                        if (row_low == row_high) {
+                            return false;
+                        }
                     }
                 }
                 if (b->type == GGML_TYPE_F16 && a->type != GGML_TYPE_F16) {
