@@ -2650,6 +2650,246 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     }
 }
 
+// [TAG_MMID_SPLIT_FAST_PATH] V4 row-split MUL_MAT_ID per-device fast path.
+//
+// The Tier-C gather fallback below (added in PR #2) is correct but copies the
+// entire expert weight tensor through PCIe on every call. For V4 decode at
+// 1 token × 43 MoE layers, that's ~80 GB of transfer per token — 0.5 t/s
+// instead of the layer-split 19.4 t/s.
+//
+// This fast path keeps each device working on its local slab of expert
+// weights. Eligibility (verified against codex plan-review):
+//   - src0 is quantized (so dispatch goes to MMVQ)
+//   - dst->ne[2] == 1 (single-token; hits generic mul_mat_vec_q, not _moe)
+//   - dst->ne[2] <= get_mmvq_mmid_max_batch(...) (forces MMVQ branch in the
+//     ggml_cuda_mul_mat_id type dispatch)
+//   - root->ne[3] == 1 (no multi-sample MMID)
+//   - Each device's [row_low, row_high) in root coordinates is a whole-expert
+//     range: row_low % root->ne[1] == 0 && row_high % root->ne[1] == 0.
+//
+// Mechanics:
+//   1. Allocate dst_main on ctx.device; zero-init.
+//   2. For each participating device id:
+//      - Allocate dst_temp_id on device id (zero-init).
+//      - Copy src1 and ids to device id if needed.
+//      - Build a local src0 metadata clone covering only this device's
+//        experts (ne[2] = expert count for this device, data = local slab).
+//      - Launch ggml_cuda_mul_mat_vec_q_split with this device's
+//        expert_low/expert_high. The kernel skips ids cells outside that
+//        range; in-range cells write through unchanged to dst_temp_id.
+//   3. Sync events; peer-copy each dst_temp_id to ctx.device scratch.
+//   4. Add scratches into dst_main with a small F32 add kernel.
+//
+// Returns true if the fast path ran; false means the caller must fall back
+// to the gather path.
+static __global__ void mmid_split_add_into_kernel(float * __restrict__ dst, const float * __restrict__ src, size_t n) {
+    const size_t i = blockIdx.x * (size_t) blockDim.x + threadIdx.x;
+    if (i < n) {
+        dst[i] += src[i];
+    }
+}
+
+static void mmid_split_add_into(float * dst, const float * src, size_t n, cudaStream_t stream) {
+    constexpr size_t block = 256;
+    const size_t grid = (n + block - 1) / block;
+    mmid_split_add_into_kernel<<<grid, block, 0, stream>>>(dst, src, n);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+static bool ggml_cuda_mul_mat_id_split_fast(
+        ggml_backend_cuda_context & ctx, ggml_tensor * dst,
+        const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * ids) {
+    // Walk to root cuda_split tensor; src0 may be a Tier-1 view.
+    const ggml_tensor * root = src0;
+    while (root->view_src) {
+        root = root->view_src;
+    }
+    GGML_ASSERT(root->extra != nullptr);
+
+    // Eligibility checks (codex-approved set):
+    if (!ggml_is_quantized(src0->type)) return false;
+    if (root->ne[3] != 1) return false;
+    if (src0->ne[3] != 1) return false;
+    if (dst->ne[2] != 1) return false; // single-token only
+
+    const int cc = ggml_cuda_info().devices[ctx.device].cc;
+    if (dst->ne[2] > (int64_t) get_mmvq_mmid_max_batch(src0->type, cc)) return false;
+
+    // ne01 = rows per expert (in root coordinates). For V4's wo_a_g this is
+    // o_lora_rank. We need row_low/row_high in root flat-row coords to land
+    // on whole-expert boundaries.
+    const int64_t root_ne1 = root->ne[1];
+    if (root_ne1 <= 0) return false;
+
+    ggml_backend_cuda_split_buffer_type_context * buft_ctx =
+        (ggml_backend_cuda_split_buffer_type_context *) root->buffer->buft->context;
+
+    const int n_devices = ggml_backend_cuda_get_device_count();
+
+    // Per-device expert ranges (whole-expert aligned check)
+    struct dev_range { int64_t expert_low; int64_t expert_high; };
+    std::vector<dev_range> ranges(n_devices, {0, 0});
+    int n_active = 0;
+
+    for (int id = 0; id < n_devices; ++id) {
+        int64_t row_low_root, row_high_root;
+        get_row_split(&row_low_root, &row_high_root, root, buft_ctx->tensor_split, id);
+        if (row_low_root == row_high_root) continue;
+        if (row_low_root  % root_ne1 != 0) return false; // not whole-expert aligned
+        if (row_high_root % root_ne1 != 0) return false;
+        ranges[id].expert_low  = row_low_root  / root_ne1;
+        ranges[id].expert_high = row_high_root / root_ne1;
+        ++n_active;
+    }
+    if (n_active == 0) return false;
+    if (n_active == 1) return false; // single-device row-split → gather is just as fast
+
+    static int trace = -1;
+    if (trace < 0) {
+        const char * t = getenv("GGML_CUDA_DSV4_MMID_TRACE");
+        trace = (t && *t && *t != '0') ? 1 : 0;
+    }
+    if (trace) {
+        fprintf(stderr, "[v4-mmid] FAST root=[%lld,%lld,%lld] src0_view=[%lld,%lld,%lld] dst=[%lld,%lld,%lld] n_active=%d ranges=",
+                (long long)root->ne[0], (long long)root->ne[1], (long long)root->ne[2],
+                (long long)src0->ne[0], (long long)src0->ne[1], (long long)src0->ne[2],
+                (long long)dst->ne[0], (long long)dst->ne[1], (long long)dst->ne[2], n_active);
+        for (int id = 0; id < n_devices; ++id) {
+            fprintf(stderr, "[d%d:%lld-%lld]", id, (long long)ranges[id].expert_low, (long long)ranges[id].expert_high);
+        }
+        fputc('\n', stderr);
+    }
+
+    ggml_tensor_extra_gpu * src0_extra = (ggml_tensor_extra_gpu *) root->extra;
+
+    // dst on ctx.device. Zero-init (each device contributes its in-range cells).
+    const size_t dst_nelem = ggml_nelements(dst);
+    const size_t dst_bytes = dst_nelem * sizeof(float);
+    float * dst_main = (float *) dst->data;
+    ggml_cuda_set_device(ctx.device);
+    CUDA_CHECK(cudaMemsetAsync(dst_main, 0, dst_bytes, ctx.stream()));
+
+    // Record event on ctx so peer devices can wait until main src1/ids
+    // are valid (they were produced on ctx.stream by upstream nodes).
+    cudaEvent_t ctx_ready;
+    CUDA_CHECK(cudaEventCreateWithFlags(&ctx_ready, cudaEventDisableTiming));
+    CUDA_CHECK(cudaEventRecord(ctx_ready, ctx.stream()));
+
+    // Per-device temp dst (full shape, zero-init). One per device that's not ctx.device.
+    struct dev_state {
+        ggml_cuda_pool_alloc<char> dst_temp;
+        ggml_cuda_pool_alloc<char> src1_copy;
+        ggml_cuda_pool_alloc<char> ids_copy;
+        cudaEvent_t done = nullptr;
+    };
+    std::vector<dev_state> devs(n_devices);
+
+    const size_t src1_bytes = ggml_nbytes(src1);
+    const size_t ids_bytes  = ggml_nbytes(ids);
+
+    for (int id = 0; id < n_devices; ++id) {
+        if (ranges[id].expert_low == ranges[id].expert_high) continue;
+
+        ggml_cuda_set_device(id);
+        cudaStream_t s = ctx.stream(id, 0);
+
+        // wait for ctx.stream() to finish producing src1/ids
+        if (id != ctx.device) {
+            CUDA_CHECK(cudaStreamWaitEvent(s, ctx_ready, 0));
+        }
+
+        // Per-device dst temp. ctx.device writes directly to dst_main; other
+        // devices write to a local temp that we'll peer-copy + add.
+        float * dst_local = dst_main;
+        if (id != ctx.device) {
+            char * p = devs[id].dst_temp.alloc(ctx.pool(id), dst_bytes);
+            CUDA_CHECK(cudaMemsetAsync(p, 0, dst_bytes, s));
+            dst_local = (float *) p;
+        }
+
+        // src1 and ids on device id (peer-copy if needed). For ctx.device the
+        // tensors are already there; the impl reads them directly.
+        const ggml_tensor * src1_dev = src1;
+        const ggml_tensor * ids_dev  = ids;
+        ggml_tensor src1_local_storage;
+        ggml_tensor ids_local_storage;
+        if (id != ctx.device) {
+            char * p_s1 = devs[id].src1_copy.alloc(ctx.pool(id), src1_bytes);
+            CUDA_CHECK(cudaMemcpyPeerAsync(p_s1, id, src1->data, ctx.device, src1_bytes, s));
+            src1_local_storage = *src1;
+            src1_local_storage.data = p_s1;
+            src1_dev = &src1_local_storage;
+
+            char * p_id = devs[id].ids_copy.alloc(ctx.pool(id), ids_bytes);
+            CUDA_CHECK(cudaMemcpyPeerAsync(p_id, id, ids->data, ctx.device, ids_bytes, s));
+            ids_local_storage = *ids;
+            ids_local_storage.data = p_id;
+            ids_dev = &ids_local_storage;
+        }
+
+        // Build per-device src0: same dtype/ne[0]/ne[1] (rows per expert),
+        // ne[2] = local expert count, data = device's slab base.
+        //
+        // Keep src0_local.buffer = the original cuda_split buffer. The impl
+        // only reads ggml_backend_buffer_get_usage() (USAGE_WEIGHTS for split
+        // buffers, so the COMPUTE padding-clear branch is skipped — important
+        // because src0_local.data points to a different device's memory than
+        // ctx.device, and we must not cudaMemsetAsync into a peer slab from
+        // ctx.stream(). Inside the impl, src0_local.data is just a pointer.
+        const int64_t n_local_experts = ranges[id].expert_high - ranges[id].expert_low;
+        ggml_tensor src0_local = *src0;
+        src0_local.data     = src0_extra->data_device[id];
+        src0_local.ne[2]    = n_local_experts;
+        // Recompute strides for the new shape (nb[2] stays = nb[1]*ne[1]).
+        src0_local.nb[3]    = src0_local.nb[2] * src0_local.ne[2];
+        src0_local.view_src = nullptr;
+        src0_local.view_offs = 0;
+        src0_local.extra    = nullptr;
+
+        ggml_cuda_mul_mat_vec_q_split(
+            ctx, &src0_local, src1_dev, ids_dev, dst,
+            s, ctx.pool(id), (id == ctx.device) ? nullptr : (void *) dst_local,
+            (uint32_t) ranges[id].expert_low, (uint32_t) ranges[id].expert_high);
+
+        // Record completion event so the main device can wait + aggregate.
+        if (id != ctx.device) {
+            CUDA_CHECK(cudaEventCreateWithFlags(&devs[id].done, cudaEventDisableTiming));
+            CUDA_CHECK(cudaEventRecord(devs[id].done, s));
+        }
+    }
+
+    // Aggregate on ctx.device: for each non-main device, peer-copy its temp
+    // to ctx.device scratch then add into dst_main.
+    ggml_cuda_set_device(ctx.device);
+    ggml_cuda_pool_alloc<char> agg_scratch(ctx.pool());
+    char * scratch = nullptr;
+    for (int id = 0; id < n_devices; ++id) {
+        if (id == ctx.device) continue;
+        if (ranges[id].expert_low == ranges[id].expert_high) continue;
+
+        // Wait on the per-device kernel
+        CUDA_CHECK(cudaStreamWaitEvent(ctx.stream(), devs[id].done, 0));
+
+        if (scratch == nullptr) {
+            scratch = agg_scratch.alloc(dst_bytes);
+        }
+        // Peer-copy the temp to ctx.device scratch, then add into dst_main.
+        CUDA_CHECK(cudaMemcpyPeerAsync(scratch, ctx.device,
+                                       devs[id].dst_temp.get(), id,
+                                       dst_bytes, ctx.stream()));
+        mmid_split_add_into(dst_main, (const float *) scratch, dst_nelem, ctx.stream());
+    }
+
+    // Cleanup events
+    CUDA_CHECK(cudaEventDestroy(ctx_ready));
+    for (int id = 0; id < n_devices; ++id) {
+        if (devs[id].done) {
+            CUDA_CHECK(cudaEventDestroy(devs[id].done));
+        }
+    }
+    return true;
+}
+
 static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src0 = dst->src[0];
     const ggml_tensor * src1 = dst->src[1];
@@ -2657,6 +2897,23 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
     GGML_ASSERT(src1->type == GGML_TYPE_F32);
     GGML_ASSERT(dst->type  == GGML_TYPE_F32);
+
+    // [TAG_MMID_SPLIT_FAST_PATH] Try per-device fast path first for cuda_split
+    // src0. If not eligible (wrong shape, unaligned split, etc.) the function
+    // returns false and we fall through to the gather fallback below.
+    if (ggml_backend_buft_is_cuda_split(src0->buffer->buft)) {
+        if (ggml_cuda_mul_mat_id_split_fast(ctx, dst, src0, src1, ids)) {
+            return;
+        }
+        static bool warned_fallback = false;
+        if (!warned_fallback) {
+            const char * t = getenv("GGML_CUDA_DSV4_MMID_TRACE");
+            if (t && *t && *t != '0') {
+                fprintf(stderr, "[v4-mmid] FALLBACK gather path engaged (fast path not eligible)\n");
+            }
+            warned_fallback = true;
+        }
+    }
 
     // Tier-C cuda_split fallback for MUL_MAT_ID: gather per-device slabs of src0
     // onto ctx.device into a contiguous temp buffer, then run the non-split path

@@ -1,0 +1,59 @@
+{
+  "id": "v4-rowsplit-perf",
+  "state": "implementing",
+  "spec_path": ".claude/agents/v4-rowsplit-perf.md",
+  "plan_path": "docs/plans/v4-rowsplit-perf.md",
+  "branch": "fix/v4-rowsplit-perf",
+  "review_rounds": 1,
+  "history": [
+    {
+      "at": "2026-05-14",
+      "from": null,
+      "to": "pending-dispatch",
+      "agent": "user",
+      "note": "Created. Pre-staged perf optimization task: replace gather-to-main-device MUL_MAT_ID fallback (from PR #2) with per-device row-slice routing. Target: 2x layer-split baseline (40 t/s). Will dispatch when the second orchestrator returns confirming slow gen."
+    },
+    {
+      "at": "2026-05-14",
+      "from": "pending-dispatch",
+      "to": "roadmap",
+      "agent": "user-via-claude",
+      "note": "Both rowsplit-fix orchestrators returned confirming 0.5 t/s on PR #2's gather-to-main impl. Per user pre-dispatch directive, dispatching this perf task now."
+    },
+    {
+      "at": "2026-05-14",
+      "from": "roadmap",
+      "to": "planning",
+      "agent": "orchestrator",
+      "note": "Beginning design consult with codex on ggml_cuda_op_mul_mat cuda_split aggregation pattern before drafting plan."
+    },
+    {
+      "at": "2026-05-14",
+      "from": "planning",
+      "to": "plan-review",
+      "agent": "orchestrator",
+      "note": "Plan written after 3 codex design consults. Approach: targeted MMVQ split fast path (expert-range guard in mul_mat_vec_q kernel only). Whole-expert aligned splits only; else gather fallback. ~150-200 LOC. Codex consult outputs: /tmp/v4-rowsplit-perf/design-consult-{1,2,3}-output.txt"
+    },
+    {
+      "at": "2026-05-14",
+      "from": "plan-review",
+      "to": "planning",
+      "agent": "codex",
+      "note": "REQUEST_CHANGES round 1. Blockers: (a) eligibility predicate (use dst->ne[2]==1 + get_mmvq_mmid_max_batch + ne[3]==1), (b) root-coordinate alignment documentation, (c) CUDA graph claim correction, (d) runtime verification hook. /tmp/v4-rowsplit-perf/plan-review-output.txt"
+    },
+    {
+      "at": "2026-05-14",
+      "from": "planning",
+      "to": "plan-review",
+      "agent": "orchestrator",
+      "note": "Plan revised: all 4 blockers addressed. Added root-coordinate section, fixed eligibility predicate, added GGML_CUDA_DSV4_MMID_TRACE hook, corrected graph-capture claim."
+    },
+    {
+      "at": "2026-05-14",
+      "from": "plan-review",
+      "to": "implementing",
+      "agent": "codex",
+      "note": "APPROVE round 2. All blockers addressed. One non-blocker note: summary line ne12 fixed. /tmp/v4-rowsplit-perf/plan-review-2-output.txt"
+    }
+  ]
+}
