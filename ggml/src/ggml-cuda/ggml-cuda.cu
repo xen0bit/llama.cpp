@@ -2793,6 +2793,24 @@ static bool ggml_cuda_mul_mat_id_split_fast(
     cudaEvent_t copy_done_events[GGML_CUDA_MAX_DEVICES] = {nullptr};
     char * dst_temp_ptrs[GGML_CUDA_MAX_DEVICES] = {nullptr};
 
+    // [Codex round-2 blocker fix] Pre-allocate the ctx.device aggregation
+    // scratches BEFORE any MMVQ dispatch. The MMVQ helper (especially for
+    // id == ctx.device) allocates an internal src1_q8_1 from ctx.pool() and
+    // returns it to the pool when the helper exits — while the MMVQ kernel
+    // is still enqueued on ctx.stream() but not yet running. If we allocated
+    // scratch *after* that, ctx.pool() could hand the same chunk to scratch,
+    // and the peer-stream cudaMemcpyPeerAsync write would race the still-in-
+    // flight MMVQ read on ctx.stream(). Allocating scratch first keeps it
+    // reserved for the entire function lifetime, so MMVQ's internal temps
+    // get different chunks.
+    ggml_cuda_set_device(ctx.device);
+    ggml_cuda_pool_alloc<char> agg_scratch_alloc[GGML_CUDA_MAX_DEVICES];
+    for (int id = 0; id < n_devices; ++id) {
+        if (id == ctx.device) continue;
+        if (ranges[id].expert_low == ranges[id].expert_high) continue;
+        agg_scratch_alloc[id].alloc(ctx.pool(), dst_bytes);
+    }
+
     const size_t src1_bytes = ggml_nbytes(src1);
     const size_t ids_bytes  = ggml_nbytes(ids);
 
@@ -2866,31 +2884,41 @@ static bool ggml_cuda_mul_mat_id_split_fast(
     }
 
     // Aggregate on ctx.device. For each non-main device:
-    //   1. Allocate a per-device scratch on ctx.pool() — separate buffers per
-    //      peer so each peer-copy writes to its own scratch (no inter-peer
-    //      WAW races on a shared scratch buffer).
-    //   2. Enqueue the peer-copy on the PEER stream (so the peer pool's
-    //      stream-bound allocator covers the temp read; the existing
-    //      ggml_cuda_op_mul_mat split path uses the same convention).
-    //   3. Record copy_done_events[id] on the peer stream.
-    //   4. ctx.stream() waits on copy_done_events[id] before the add kernel.
+    //   1. Use the pre-allocated agg_scratch_alloc[id] on ctx.pool().
+    //   2. Record an event on ctx.stream() AFTER ctx.device's MMVQ (or
+    //      simply at this point: all ctx.stream() work so far — the zero-
+    //      init of dst_main and ctx.device's MMVQ kernel — has been enqueued
+    //      before the peer-copy is issued). The peer stream waits on this
+    //      event before writing scratch, so it cannot race with any
+    //      ctx.stream() temporary that may have been pool-reused.
+    //   3. Enqueue the peer-copy on the PEER stream (matches the
+    //      ggml_cuda_op_mul_mat split convention; the peer pool's stream-
+    //      bound reuse covers the temp READ from dst_temp_ptrs[id]).
+    //   4. Record copy_done_events[id] on the peer stream.
+    //   5. ctx.stream() waits on copy_done_events[id] before the add kernel.
     //
-    // [Codex round-1 blocker fix] The previous version enqueued peer-copy on
-    // ctx.stream() and reused a single scratch. The peer pool's reuse logic
-    // is bound to the peer stream and was unaware of the main-stream read,
-    // so a later launch on the peer stream could clobber the temp before the
-    // copy finished. The fix enqueues peer-copies on peer streams (matching
-    // the convention in ggml_cuda_op_mul_mat) and uses per-device scratches.
+    // [Codex round-2 blocker fix] We additionally record ctx_after_mmvq and
+    // have the peer stream wait on it before its peer-copy, so the
+    // peer-stream write to scratch cannot land before any ctx.stream()
+    // temporaries that may have been pool-recycled into the scratch chunk
+    // have been consumed by ctx.stream() kernels.
     ggml_cuda_set_device(ctx.device);
-    ggml_cuda_pool_alloc<char> agg_scratch_alloc[GGML_CUDA_MAX_DEVICES];
+    cudaEvent_t ctx_after_mmvq;
+    CUDA_CHECK(cudaEventCreateWithFlags(&ctx_after_mmvq, cudaEventDisableTiming));
+    CUDA_CHECK(cudaEventRecord(ctx_after_mmvq, ctx.stream()));
+
     for (int id = 0; id < n_devices; ++id) {
         if (id == ctx.device) continue;
         if (ranges[id].expert_low == ranges[id].expert_high) continue;
 
-        char * scratch = agg_scratch_alloc[id].alloc(ctx.pool(), dst_bytes);
-        // Enqueue peer-copy on the peer stream (matches ggml_cuda_op_mul_mat
-        // convention; the peer pool's stream-bound reuse covers the read).
+        char * scratch = agg_scratch_alloc[id].get();
         cudaStream_t peer_stream = ctx.stream(id, 0);
+
+        // Order peer-stream write-to-scratch after all ctx.stream() work so
+        // far, in case ctx.pool() recycled a chunk that ctx.stream() is
+        // still reading from.
+        CUDA_CHECK(cudaStreamWaitEvent(peer_stream, ctx_after_mmvq, 0));
+
         CUDA_CHECK(cudaMemcpyPeerAsync(scratch, ctx.device,
                                        dst_temp_ptrs[id], id,
                                        dst_bytes, peer_stream));
@@ -2907,6 +2935,7 @@ static bool ggml_cuda_mul_mat_id_split_fast(
     // flight: it marks the event for destruction once the device's work
     // completes.
     CUDA_CHECK(cudaEventDestroy(ctx_ready));
+    CUDA_CHECK(cudaEventDestroy(ctx_after_mmvq));
     for (int id = 0; id < n_devices; ++id) {
         if (copy_done_events[id]) CUDA_CHECK(cudaEventDestroy(copy_done_events[id]));
     }
