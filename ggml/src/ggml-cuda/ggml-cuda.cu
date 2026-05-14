@@ -4774,17 +4774,29 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
             const bool data_only = !status.topology_changed &&  status.data_changed;
 
             if (!graph->warmup_complete) {
-                // Warmup: need at least 2 calls with no change on the 2nd call
+                // Warmup: need at least 2 calls with no change on the 2nd call.
+                // V4-mgpu-perf-03: ALSO accept data_only changes for cgraph keys
+                // in the validated set (ggml_cuda_graph_data_recapture_enabled),
+                // since V4 multi-GPU KV-cache-mutating splits have a data-pointer
+                // shift every call and would otherwise never transition out of
+                // pending. Capture happens with the current per-call data
+                // pointers; subsequent data shifts route through the post-warmup
+                // data_only branch below (cudaGraphExecUpdate + fallback).
                 if (no_change) {
                     graph->warmup_complete = true;
                     GGML_LOG_DEBUG("%s: CUDA graph warmup complete\n", __func__);
                     use_cuda_graph = true;
                     cuda_graph_update_required = true;
                     if (g_v4_trace_enabled) { g_v4_trace.n_warmup_first.fetch_add(1, std::memory_order_relaxed); }
+                } else if (data_only && ggml_cuda_graph_data_recapture_enabled(cuda_ctx, cgraph)) {
+                    graph->warmup_complete = true;
+                    GGML_LOG_DEBUG("%s: CUDA graph warmup complete (data_only on validated set)\n", __func__);
+                    use_cuda_graph = true;
+                    cuda_graph_update_required = true;
                 } else {
                     if (g_v4_trace_enabled) { g_v4_trace.n_warmup_pending.fetch_add(1, std::memory_order_relaxed); }
                 }
-                // else: structural or data change during warmup - execute directly (use_cuda_graph stays false)
+                // else: structural change, or data_only outside validated set - execute directly (use_cuda_graph stays false)
             } else {
                 // Post-warmup
                 if (status.topology_changed) {
