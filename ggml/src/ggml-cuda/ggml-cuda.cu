@@ -4702,6 +4702,47 @@ static bool ggml_cuda_graph_set_enabled(ggml_backend_cuda_context * cuda_ctx, co
 }
 #endif // USE_CUDA_GRAPH
 
+#ifdef USE_CUDA_GRAPH
+// V4-mgpu-perf-02 diagnostic: env-gated counters for the warmup state-machine.
+// Off by default; one predicted-not-taken branch per compute call when off.
+// Enable with GGML_CUDA_V4_GRAPH_TRACE=1. Dumps every 200 calls to stderr.
+struct ggml_cuda_v4_trace_state {
+    std::atomic<uint64_t> n_calls{0};
+    std::atomic<uint64_t> n_disabled{0};        // graph->is_enabled() false
+    std::atomic<uint64_t> n_compat_fail{0};     // check_compability false
+    std::atomic<uint64_t> n_topology{0};        // status.topology_changed
+    std::atomic<uint64_t> n_data_only_engage{0};// data_only && data_recapture_enabled
+    std::atomic<uint64_t> n_data_only_eager{0}; // data_only && !data_recapture_enabled
+    std::atomic<uint64_t> n_no_change_replay{0};// post-warmup, no_change → replay
+    std::atomic<uint64_t> n_warmup_first{0};    // !warmup, no_change → transition to true
+    std::atomic<uint64_t> n_warmup_pending{0};  // !warmup, change → eager
+};
+static ggml_cuda_v4_trace_state g_v4_trace;
+static const bool g_v4_trace_enabled = (getenv("GGML_CUDA_V4_GRAPH_TRACE") != nullptr);
+static void ggml_cuda_v4_trace_dump_if_due() {
+    if (!g_v4_trace_enabled) {
+        return;
+    }
+    const uint64_t calls = g_v4_trace.n_calls.load();
+    if (calls % 200 != 0 || calls == 0) {
+        return;
+    }
+    fprintf(stderr,
+        "[V4-GRAPH-TRACE] calls=%llu disabled=%llu compat_fail=%llu "
+        "topology=%llu data_only_engage=%llu data_only_eager=%llu "
+        "no_change_replay=%llu warmup_first=%llu warmup_pending=%llu\n",
+        (unsigned long long)calls,
+        (unsigned long long)g_v4_trace.n_disabled.load(),
+        (unsigned long long)g_v4_trace.n_compat_fail.load(),
+        (unsigned long long)g_v4_trace.n_topology.load(),
+        (unsigned long long)g_v4_trace.n_data_only_engage.load(),
+        (unsigned long long)g_v4_trace.n_data_only_eager.load(),
+        (unsigned long long)g_v4_trace.n_no_change_replay.load(),
+        (unsigned long long)g_v4_trace.n_warmup_first.load(),
+        (unsigned long long)g_v4_trace.n_warmup_pending.load());
+}
+#endif // USE_CUDA_GRAPH
+
 static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
 
@@ -4712,6 +4753,8 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     const void * graph_key = nullptr;
 
 #ifdef USE_CUDA_GRAPH
+    if (g_v4_trace_enabled) { g_v4_trace.n_calls.fetch_add(1, std::memory_order_relaxed); }
+
     graph_key = ggml_cuda_graph_get_key(cgraph);
 
     // Latch DSV4-session detection. Once any cgraph in this context contains
@@ -4737,6 +4780,9 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
                     GGML_LOG_DEBUG("%s: CUDA graph warmup complete\n", __func__);
                     use_cuda_graph = true;
                     cuda_graph_update_required = true;
+                    if (g_v4_trace_enabled) { g_v4_trace.n_warmup_first.fetch_add(1, std::memory_order_relaxed); }
+                } else {
+                    if (g_v4_trace_enabled) { g_v4_trace.n_warmup_pending.fetch_add(1, std::memory_order_relaxed); }
                 }
                 // else: structural or data change during warmup - execute directly (use_cuda_graph stays false)
             } else {
@@ -4745,6 +4791,7 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
                     // Structural change - reset warmup, execute directly until stable again
                     graph->warmup_complete = false;
                     GGML_LOG_DEBUG("%s: CUDA graph warmup reset (topology)\n", __func__);
+                    if (g_v4_trace_enabled) { g_v4_trace.n_topology.fetch_add(1, std::memory_order_relaxed); }
                 } else if (data_only && ggml_cuda_graph_data_recapture_enabled(cuda_ctx, cgraph)) {
                     // V4-mgpu-perf-02 §3.4.2: pointer-only change on the validated set.
                     // Re-capture into a fresh graph object with the current data pointers,
@@ -4752,21 +4799,29 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
                     // handled in ggml_cuda_graph_update_executable, unchanged).
                     use_cuda_graph = true;
                     cuda_graph_update_required = true;
+                    if (g_v4_trace_enabled) { g_v4_trace.n_data_only_engage.fetch_add(1, std::memory_order_relaxed); }
                 } else if (data_only) {
                     // Pointer-only change outside the validated set - reset warmup, eager.
                     // Same as today's behavior for this case.
                     graph->warmup_complete = false;
                     GGML_LOG_DEBUG("%s: CUDA graph warmup reset (data, outside validated set)\n", __func__);
+                    if (g_v4_trace_enabled) { g_v4_trace.n_data_only_eager.fetch_add(1, std::memory_order_relaxed); }
                 } else {
                     // no_change: cheapest replay path. The existing instance is still
                     // semantically valid because nothing changed since it was instantiated.
                     GGML_ASSERT(no_change);
                     use_cuda_graph = true;
                     cuda_graph_update_required = (graph->instance == nullptr);
+                    if (g_v4_trace_enabled) { g_v4_trace.n_no_change_replay.fetch_add(1, std::memory_order_relaxed); }
                 }
             }
+        } else {
+            if (g_v4_trace_enabled) { g_v4_trace.n_compat_fail.fetch_add(1, std::memory_order_relaxed); }
         }
+    } else {
+        if (g_v4_trace_enabled) { g_v4_trace.n_disabled.fetch_add(1, std::memory_order_relaxed); }
     }
+    ggml_cuda_v4_trace_dump_if_due();
 #endif // USE_CUDA_GRAPH
 
     if (use_cuda_graph && cuda_graph_update_required) {
