@@ -1197,10 +1197,24 @@ struct ggml_cuda_graph {
     uint64_t uid = 0;
     int64_t last_used_time = 0;
     struct node_properties {
+        // Full snapshot of the node tensor (op/type/flags/ne/nb/op_params/data/view_src/view_offs/buffer/extra)
+        // captured by memcpy(&prop.node, cgraph->nodes[i], sizeof(ggml_tensor)).
         ggml_tensor node;
-        void *   node_src_data_ptrs[GGML_MAX_SRC];
-        int64_t  node_src_ne[GGML_MAX_SRC][GGML_MAX_DIMS];
-        size_t   node_src_nb[GGML_MAX_SRC][GGML_MAX_DIMS];
+
+        // Per-src snapshots. Extended in v4-mgpu-perf-02 to include identity/op/type/flags/view_src/view_offs/buffer/extra
+        // so the structural-vs-data-only equality predicate (used by data-recapture path) can distinguish a pure
+        // data-pointer shift from a structural change. See ggml_cuda_graph_update_required.
+        void *           node_src_ptr        [GGML_MAX_SRC];
+        ggml_op          node_src_op         [GGML_MAX_SRC];
+        ggml_type        node_src_type       [GGML_MAX_SRC];
+        int32_t          node_src_flags      [GGML_MAX_SRC];
+        int64_t          node_src_ne         [GGML_MAX_SRC][GGML_MAX_DIMS];
+        size_t           node_src_nb         [GGML_MAX_SRC][GGML_MAX_DIMS];
+        void *           node_src_view_src   [GGML_MAX_SRC];
+        size_t           node_src_view_offs  [GGML_MAX_SRC];
+        void *           node_src_buffer     [GGML_MAX_SRC];
+        void *           node_src_extra      [GGML_MAX_SRC];
+        void *           node_src_data_ptrs  [GGML_MAX_SRC]; // mutable pointer — kept separate for clarity
     };
     std::vector<node_properties> node_props;
 
@@ -1378,6 +1392,11 @@ struct ggml_backend_cuda_context {
     std::unordered_map<const void *, std::unique_ptr<ggml_cuda_graph>> cuda_graphs;
 
     int64_t last_graph_eviction_sweep = 0;
+
+    // Set once when any cgraph computed by this context contains a DSV4-family
+    // op (LLM_ARCH_DEEPSEEK4). Used by ggml_cuda_graph_data_recapture_enabled
+    // to restrict the data-recapture fast path to V4 sessions. Never cleared.
+    bool dsv4_detected = false;
 
     ggml_cuda_graph * cuda_graph(const void * first_node_ptr) {
         const int64_t time_now = ggml_time_us();

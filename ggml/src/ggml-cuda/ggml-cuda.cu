@@ -3376,8 +3376,101 @@ static const void * ggml_cuda_graph_get_key(ggml_cgraph * cgraph) {
     return cgraph->nodes[0];
 }
 
-static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph) {
-    bool res = false;
+// Result of ggml_cuda_graph_update_required: distinguishes structural changes
+// (require re-warmup) from pure data-pointer changes (eligible for the
+// data-recapture fast path when ggml_cuda_graph_data_recapture_enabled).
+struct ggml_cuda_graph_update_status {
+    bool topology_changed;
+    bool data_changed;
+};
+
+// Sets cuda_ctx->dsv4_detected = true if cgraph contains any DSV4-family op.
+// Once set, the flag is never cleared for the lifetime of the context. The
+// V4 model emits these ops in attention-bearing splits; FFN-only splits do
+// not have them, so this latch is what lets ggml_cuda_graph_data_recapture_enabled
+// recognize FFN splits as part of a V4 session.
+static void ggml_cuda_graph_detect_dsv4(ggml_backend_cuda_context * cuda_ctx, const ggml_cgraph * cgraph) {
+    if (cuda_ctx->dsv4_detected) {
+        return;
+    }
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        const ggml_op op = cgraph->nodes[i]->op;
+        if (op == GGML_OP_DSV4_HC_SPLIT_SINKHORN ||
+            op == GGML_OP_DSV4_HC_WEIGHTED_SUM   ||
+            op == GGML_OP_DSV4_HC_EXPAND         ||
+            op == GGML_OP_DSV4_FP8_KV_QUANTIZE   ||
+            op == GGML_OP_DSV4_ROPE_TAIL) {
+            cuda_ctx->dsv4_detected = true;
+            return;
+        }
+    }
+}
+
+// Returns true iff the calling cgraph is in the "validated set" for the
+// data-recapture fast path. Conditions, all required:
+//   1. Hard arch guard (NEVER env-overridable): NVIDIA Ada Lovelace or newer.
+//      AMD/MUSA encode CC with an offset that pushes their numeric values
+//      past 890, so an explicit NVIDIA check is required alongside the
+//      Ada Lovelace minimum.
+//   2. Multi-GPU configuration (device count > 1). Single-GPU CUDA graph
+//      capture was already functional pre-fix and is intentionally outside
+//      this fix's scope; the disabler we're addressing manifests in the
+//      multi-GPU layer-split path where per-token KV-cache rotation broke
+//      per-split warmup across multiple device-resident sub-cgraphs.
+//   3. V4-detection latch: the context has seen at least one DSV4-family op
+//      in some prior cgraph_compute call. This restricts the new path to
+//      DeepSeek-V4 sessions; non-V4 models leave the latch unset and fall
+//      through to the existing pre-fix path.
+//   4. Env kill-switch: GGML_CUDA_GRAPH_DATA_RECAPTURE=0 forces false.
+//   5. Workload signature: cgraph contains at least one MUL_MAT_ID node
+//      with ne[2] == 1 (single-token MoE decode). Non-MoE and prefill /
+//      batched cgraphs fall through.
+// All other cgraphs route through the existing eager + warmup-reset path
+// (unchanged from pre-fix behavior).
+static bool ggml_cuda_graph_data_recapture_enabled(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph) {
+    // 1. Hard arch guard.
+    const int cc = ggml_cuda_info().devices[cuda_ctx->device].cc;
+    if (!GGML_CUDA_CC_IS_NVIDIA(cc) || cc < GGML_CUDA_CC_ADA_LOVELACE) {
+        return false;
+    }
+
+    // 2. Multi-GPU only.
+    if (ggml_backend_cuda_get_device_count() <= 1) {
+        return false;
+    }
+
+    // 3. V4-detection latch.
+    if (!cuda_ctx->dsv4_detected) {
+        return false;
+    }
+
+    // 4. Env kill-switch only (=0). Default is ON.
+    static const bool env_kill = []() {
+        const char * v = getenv("GGML_CUDA_GRAPH_DATA_RECAPTURE");
+        return v != nullptr && atoi(v) == 0;
+    }();
+    if (env_kill) {
+        return false;
+    }
+
+    // 5. Workload signature: at least one MMID node, with all MMID nodes
+    //    at ne[2] == 1 (single-token MoE decode).
+    bool has_mmid_decode = false;
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        ggml_tensor * node = cgraph->nodes[i];
+        if (node->op == GGML_OP_MUL_MAT_ID) {
+            if (node->ne[2] != 1) {
+                return false; // prefill / batched eval — not validated
+            }
+            has_mmid_decode = true;
+        }
+    }
+    return has_mmid_decode;
+}
+
+static ggml_cuda_graph_update_status
+ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph) {
+    ggml_cuda_graph_update_status status = { false, false };
 
     const void * graph_key = ggml_cuda_graph_get_key(cgraph);
     ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
@@ -3386,36 +3479,102 @@ static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx
         cgraph->uid == graph->uid) {
         GGML_LOG_DEBUG("CUDA Graph id %zu reused\n", cgraph->uid);
         GGML_ASSERT((int)graph->node_props.size() == cgraph->n_nodes);
-        return false;
+        return status;
     }
 
     graph->uid = cgraph->uid;
 
-    // Check if the graph size has changed
+    // Size mismatch is unambiguously a topology change.
     if ((int)graph->node_props.size() != cgraph->n_nodes) {
-        res = true;
+        status.topology_changed = true;
         graph->node_props.resize(cgraph->n_nodes);
     }
 
     for (int i = 0; i < cgraph->n_nodes; i++) {
-        ggml_cuda_graph::node_properties prop = {};
+        // Zero every byte of `prop` (including struct padding) before
+        // populating it. Value-init via `= {}` already zeros each member,
+        // but an explicit memset is unambiguous and makes the per-src
+        // memcmp comparisons below well-defined for null-src slots
+        // (where the per-src fields are never reassigned in the if (s)
+        // branch) and for any compiler-inserted padding bytes.
+        ggml_cuda_graph::node_properties prop;
+        memset(&prop, 0, sizeof(prop));
         memcpy(&prop.node, cgraph->nodes[i], sizeof(ggml_tensor));
 
         for (int j = 0; j < GGML_MAX_SRC; ++j) {
-            if (cgraph->nodes[i]->src[j]) {
-                prop.node_src_data_ptrs[j] = cgraph->nodes[i]->src[j]->data;
-                memcpy(prop.node_src_ne[j], cgraph->nodes[i]->src[j]->ne, sizeof(prop.node_src_ne[j]));
-                memcpy(prop.node_src_nb[j], cgraph->nodes[i]->src[j]->nb, sizeof(prop.node_src_nb[j]));
+            ggml_tensor * s = cgraph->nodes[i]->src[j];
+            prop.node_src_ptr[j] = s;
+            if (s) {
+                prop.node_src_op       [j] = s->op;
+                prop.node_src_type     [j] = s->type;
+                prop.node_src_flags    [j] = s->flags;
+                memcpy(prop.node_src_ne[j], s->ne, sizeof(prop.node_src_ne[j]));
+                memcpy(prop.node_src_nb[j], s->nb, sizeof(prop.node_src_nb[j]));
+                prop.node_src_view_src [j] = s->view_src;
+                prop.node_src_view_offs[j] = s->view_offs;
+                prop.node_src_buffer   [j] = s->buffer;
+                prop.node_src_extra    [j] = s->extra;
+                prop.node_src_data_ptrs[j] = s->data;
             }
+            // null branch: per-src fields remain at value-initialized zero
+            // (GGML_OP_NONE = 0, GGML_TYPE_F32 = 0, null pointers, zero
+            // ne/nb arrays). The stored node_props[i] is also zero in these
+            // slots after vector::resize value-init, so memcmp is
+            // well-defined for null-src comparisons across calls.
         }
 
-        if (res || memcmp(&graph->node_props[i], &prop, sizeof(prop)) != 0) {
+        if (status.topology_changed) {
             graph->node_props[i] = prop;
-            res = true;
+            continue;
+        }
+
+        const ggml_cuda_graph::node_properties & prev = graph->node_props[i];
+
+        // Compare structural fields (everything except mutable data pointers).
+        // Node-level: op, type, flags, ne, nb, op_params, view_src, view_offs, buffer, extra.
+        const bool node_structural_equal =
+            prev.node.op        == prop.node.op   &&
+            prev.node.type      == prop.node.type &&
+            prev.node.flags     == prop.node.flags &&
+            memcmp(prev.node.ne,        prop.node.ne,        sizeof(prop.node.ne))        == 0 &&
+            memcmp(prev.node.nb,        prop.node.nb,        sizeof(prop.node.nb))        == 0 &&
+            memcmp(prev.node.op_params, prop.node.op_params, sizeof(prop.node.op_params)) == 0 &&
+            prev.node.view_src  == prop.node.view_src  &&
+            prev.node.view_offs == prop.node.view_offs &&
+            prev.node.buffer    == prop.node.buffer    &&
+            prev.node.extra     == prop.node.extra;
+
+        // Per-src: identity, op, type, flags, ne, nb, view_src, view_offs, buffer, extra.
+        const bool src_structural_equal =
+            memcmp(prev.node_src_ptr,       prop.node_src_ptr,       sizeof(prop.node_src_ptr))       == 0 &&
+            memcmp(prev.node_src_op,        prop.node_src_op,        sizeof(prop.node_src_op))        == 0 &&
+            memcmp(prev.node_src_type,      prop.node_src_type,      sizeof(prop.node_src_type))      == 0 &&
+            memcmp(prev.node_src_flags,     prop.node_src_flags,     sizeof(prop.node_src_flags))     == 0 &&
+            memcmp(prev.node_src_ne,        prop.node_src_ne,        sizeof(prop.node_src_ne))        == 0 &&
+            memcmp(prev.node_src_nb,        prop.node_src_nb,        sizeof(prop.node_src_nb))        == 0 &&
+            memcmp(prev.node_src_view_src,  prop.node_src_view_src,  sizeof(prop.node_src_view_src))  == 0 &&
+            memcmp(prev.node_src_view_offs, prop.node_src_view_offs, sizeof(prop.node_src_view_offs)) == 0 &&
+            memcmp(prev.node_src_buffer,    prop.node_src_buffer,    sizeof(prop.node_src_buffer))    == 0 &&
+            memcmp(prev.node_src_extra,     prop.node_src_extra,     sizeof(prop.node_src_extra))     == 0;
+
+        if (!node_structural_equal || !src_structural_equal) {
+            status.topology_changed = true;
+            graph->node_props[i] = prop;
+            continue;
+        }
+
+        // Structurally identical: check data pointers.
+        const bool data_equal =
+            prev.node.data == prop.node.data &&
+            memcmp(prev.node_src_data_ptrs, prop.node_src_data_ptrs, sizeof(prop.node_src_data_ptrs)) == 0;
+
+        if (!data_equal) {
+            status.data_changed = true;
+            graph->node_props[i] = prop;
         }
     }
 
-    return res;
+    return status;
 }
 
 static void ggml_cuda_graph_update_executable(ggml_backend_cuda_context * cuda_ctx, const void * graph_key) {
@@ -4555,32 +4714,55 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 #ifdef USE_CUDA_GRAPH
     graph_key = ggml_cuda_graph_get_key(cgraph);
 
+    // Latch DSV4-session detection. Once any cgraph in this context contains
+    // a DSV4-family op, the data-recapture fast path becomes eligible.
+    ggml_cuda_graph_detect_dsv4(cuda_ctx, cgraph);
+
     ggml_cuda_graph_set_enabled(cuda_ctx, graph_key);
 
     ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
     if (graph->is_enabled()) {
         const bool graph_compatible = ggml_cuda_graph_check_compability(cgraph);
         if (graph_compatible) {
-            const bool properties_changed = ggml_cuda_graph_update_required(cuda_ctx, cgraph);
+            const ggml_cuda_graph_update_status status =
+                ggml_cuda_graph_update_required(cuda_ctx, cgraph);
+
+            const bool no_change = !status.topology_changed && !status.data_changed;
+            const bool data_only = !status.topology_changed &&  status.data_changed;
 
             if (!graph->warmup_complete) {
-                // Warmup: need at least 2 calls with no property change on the 2nd call
-                if (!properties_changed) {
+                // Warmup: need at least 2 calls with no change on the 2nd call
+                if (no_change) {
                     graph->warmup_complete = true;
                     GGML_LOG_DEBUG("%s: CUDA graph warmup complete\n", __func__);
                     use_cuda_graph = true;
                     cuda_graph_update_required = true;
                 }
-                // else: properties changed or first call - execute directly (use_cuda_graph stays false)
+                // else: structural or data change during warmup - execute directly (use_cuda_graph stays false)
             } else {
-                // Post-warmup: normal CUDA graph operation
-                if (properties_changed) {
-                    // Properties changed - reset warmup, execute directly until stable again
+                // Post-warmup
+                if (status.topology_changed) {
+                    // Structural change - reset warmup, execute directly until stable again
                     graph->warmup_complete = false;
-                    GGML_LOG_DEBUG("%s: CUDA graph warmup reset\n", __func__);
-                } else {
+                    GGML_LOG_DEBUG("%s: CUDA graph warmup reset (topology)\n", __func__);
+                } else if (data_only && ggml_cuda_graph_data_recapture_enabled(cuda_ctx, cgraph)) {
+                    // V4-mgpu-perf-02 §3.4.2: pointer-only change on the validated set.
+                    // Re-capture into a fresh graph object with the current data pointers,
+                    // then either cudaGraphExecUpdate (fast path) or re-instantiate (fallback
+                    // handled in ggml_cuda_graph_update_executable, unchanged).
                     use_cuda_graph = true;
-                    cuda_graph_update_required = graph->instance == nullptr;
+                    cuda_graph_update_required = true;
+                } else if (data_only) {
+                    // Pointer-only change outside the validated set - reset warmup, eager.
+                    // Same as today's behavior for this case.
+                    graph->warmup_complete = false;
+                    GGML_LOG_DEBUG("%s: CUDA graph warmup reset (data, outside validated set)\n", __func__);
+                } else {
+                    // no_change: cheapest replay path. The existing instance is still
+                    // semantically valid because nothing changed since it was instantiated.
+                    GGML_ASSERT(no_change);
+                    use_cuda_graph = true;
+                    cuda_graph_update_required = (graph->instance == nullptr);
                 }
             }
         }
