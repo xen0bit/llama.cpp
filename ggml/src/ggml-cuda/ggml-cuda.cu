@@ -2679,28 +2679,37 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
         GGML_ASSERT(root->extra != nullptr && "split src0 root must have extra populated");
         GGML_ASSERT(ggml_is_contiguous(src0) &&
             "MUL_MAT_ID split fallback requires contiguous src0 (Tier-1 view)");
+        // The gather is performed in the root's flat-row coordinates (that's how
+        // cuda_split partitions). We then expose the gathered storage as src0's
+        // metadata. Both must cover the same byte range — guaranteed when the
+        // view is a Tier-1 full-cover contiguous reshape (init_tensor asserts
+        // ggml_nelements(view) == ggml_nelements(root)). Verify here so any
+        // future caller that violates the contract fails loudly.
+        GGML_ASSERT(ggml_nbytes(src0) == ggml_nbytes(root) &&
+            "MUL_MAT_ID split fallback requires src0 to cover root exactly (Tier-1 view)");
+        GGML_ASSERT(src0->type == root->type &&
+            "MUL_MAT_ID split fallback requires src0 and its root to share dtype");
 
         ggml_backend_cuda_split_buffer_type_context * buft_ctx =
             (ggml_backend_cuda_split_buffer_type_context *) src0->buffer->buft->context;
         ggml_tensor_extra_gpu * src0_extra = (ggml_tensor_extra_gpu *) root->extra;
 
-        const size_t total_bytes = ggml_nbytes(src0);
-        const int64_t ne0 = src0->ne[0];
-        const size_t nb1 = src0->nb[1];
-
-        // pad row width to MATRIX_ROW_PADDING just as the split buffer does, so
-        // downstream quantized-mul kernels that read past the last logical row
-        // hit zero-padded memory rather than uninitialized data
-        size_t alloc_bytes = total_bytes;
-        if (ne0 % MATRIX_ROW_PADDING != 0) {
-            alloc_bytes += ggml_row_size(src0->type, MATRIX_ROW_PADDING - ne0 % MATRIX_ROW_PADDING);
+        // Compute padding in root coordinates: cuda_split's allocation pads each
+        // device's slab to MATRIX_ROW_PADDING along ne[0] of the *root*. We
+        // mirror that here so kernels that overread (e.g. block-quantized matmul
+        // dequant) hit zeroed memory rather than uninitialised bytes.
+        const size_t root_bytes = ggml_nbytes(root);
+        const int64_t root_ne0  = root->ne[0];
+        size_t alloc_bytes = root_bytes;
+        if (root_ne0 % MATRIX_ROW_PADDING != 0) {
+            alloc_bytes += ggml_row_size(root->type, MATRIX_ROW_PADDING - root_ne0 % MATRIX_ROW_PADDING);
         }
 
         ggml_cuda_set_device(ctx.device);
         char * gathered = src0_gathered_pool.alloc(alloc_bytes);
         // zero the padding tail to avoid NaNs in quantized blocks
-        if (alloc_bytes > total_bytes) {
-            CUDA_CHECK(cudaMemsetAsync(gathered + total_bytes, 0, alloc_bytes - total_bytes, ctx.stream()));
+        if (alloc_bytes > root_bytes) {
+            CUDA_CHECK(cudaMemsetAsync(gathered + root_bytes, 0, alloc_bytes - root_bytes, ctx.stream()));
         }
 
         for (int id = 0; id < ggml_backend_cuda_get_device_count(); ++id) {
@@ -2710,8 +2719,10 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
             if (nrows_split == 0) {
                 continue;
             }
-            const size_t offset_split = row_low * nb1;
-            const size_t copy_bytes   = ggml_nbytes_split(src0, nrows_split);
+            // root-based offset/copy size: src0 (view) shares root's contiguous
+            // byte layout (asserted above), so this lands in the right place.
+            const size_t offset_split = row_low * root->nb[1];
+            const size_t copy_bytes   = ggml_nbytes_split(root, nrows_split);
 
             if (id == ctx.device) {
                 CUDA_CHECK(cudaMemcpyAsync(gathered + offset_split,
@@ -2726,8 +2737,10 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
                                                ctx.stream()));
             }
         }
-        // synchronize so the gathered buffer is ready before the kernels read it
-        CUDA_CHECK(cudaStreamSynchronize(ctx.stream()));
+        // The peer copies and the downstream matmul kernels are all enqueued on
+        // ctx.stream(), so same-stream ordering keeps them sequenced without an
+        // explicit sync. (Codex review: cudaStreamSynchronize is not required
+        // here for correctness; weight data is static, no producer race.)
 
         // build a non-split clone of src0's metadata pointing at gathered storage
         src0_gathered_storage = *src0;
@@ -2740,6 +2753,12 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     } else {
         GGML_ASSERT(!ggml_backend_buft_is_cuda_split(src0->buffer->buft));
     }
+    // Other source tensors (src1 = activations, ids) must not be in cuda_split
+    // buffers — only the weight (src0) is handled by the gather fallback.
+    GGML_ASSERT(!ggml_backend_buft_is_cuda_split(src1->buffer->buft) &&
+        "mul_mat_id split fallback only handles split src0; src1 must be non-split");
+    GGML_ASSERT(!ggml_backend_buft_is_cuda_split(ids->buffer->buft) &&
+        "mul_mat_id split fallback only handles split src0; ids must be non-split");
 
     GGML_TENSOR_BINARY_OP_LOCALS
 
@@ -5250,6 +5269,13 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
     // MUL_MAT_ID handles split src0 via an internal gather-to-main-device
     // fallback (ggml_cuda_mul_mat_id at ggml-cuda.cu:2653+); the dispatch may
     // run on any device because the kernel itself relocates the data.
+    //
+    // For MUL_MAT_ID specifically, the gather fallback only handles a split
+    // src0 (weight). src1 (activations) and src[2] (ids) must remain
+    // non-split — handled by the per-op gate further below in the MUL_MAT_ID
+    // case of the switch. The exemption here means MUL_MAT and MUL_MAT_ID are
+    // checked individually for split-buffer compatibility rather than via this
+    // blanket rejection.
     if (op->op != GGML_OP_MUL_MAT &&
         op->op != GGML_OP_MUL_MAT_ID &&
         op->op != GGML_OP_RESHAPE &&
@@ -5262,6 +5288,15 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         op->op != GGML_OP_DSV4_FP8_KV_QUANTIZE &&
         op->op != GGML_OP_DSV4_ROPE_TAIL) {
         for (int i = 0; i < GGML_MAX_SRC; i++) {
+            if (op->src[i] && op->src[i]->buffer && ggml_backend_buft_is_cuda_split(op->src[i]->buffer->buft)) {
+                return false;
+            }
+        }
+    }
+    // MUL_MAT_ID fallback only handles src0 in cuda_split. If any other source
+    // (src1 or ids) is in a split buffer, the op is unsupported on this backend.
+    if (op->op == GGML_OP_MUL_MAT_ID) {
+        for (int i = 1; i < GGML_MAX_SRC; i++) {
             if (op->src[i] && op->src[i]->buffer && ggml_backend_buft_is_cuda_split(op->src[i]->buffer->buft)) {
                 return false;
             }
