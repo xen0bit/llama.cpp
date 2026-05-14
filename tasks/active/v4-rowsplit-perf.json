@@ -1,10 +1,10 @@
 {
   "id": "v4-rowsplit-perf",
-  "state": "implementing",
+  "state": "testing",
   "spec_path": ".claude/agents/v4-rowsplit-perf.md",
   "plan_path": "docs/plans/v4-rowsplit-perf.md",
   "branch": "fix/v4-rowsplit-perf",
-  "review_rounds": 1,
+  "review_rounds": 3,
   "history": [
     {
       "at": "2026-05-14",
@@ -54,6 +54,48 @@
       "to": "implementing",
       "agent": "codex",
       "note": "APPROVE round 2. All blockers addressed. One non-blocker note: summary line ne12 fixed. /tmp/v4-rowsplit-perf/plan-review-2-output.txt"
+    },
+    {
+      "at": "2026-05-14",
+      "from": "implementing",
+      "to": "code-review",
+      "agent": "orchestrator",
+      "note": "Implementation: per-device fast path in ggml-cuda.cu + kernel guard in mmvq.cu. Commit b16efa74f. ~230 LOC."
+    },
+    {
+      "at": "2026-05-14",
+      "from": "code-review",
+      "to": "implementing",
+      "agent": "codex",
+      "note": "REQUEST_CHANGES round 1. Blockers: (a) peer dst_temp lifetime unsafe (peer-copy on ctx.stream), (b) missing Tier-1/full-cover view checks. /tmp/v4-rowsplit-perf/code-review-output.txt"
+    },
+    {
+      "at": "2026-05-14",
+      "from": "implementing",
+      "to": "code-review",
+      "agent": "orchestrator",
+      "note": "Fixed: peer-copy on peer stream + per-device scratch + view checks. Commit 58df31c06."
+    },
+    {
+      "at": "2026-05-14",
+      "from": "code-review",
+      "to": "implementing",
+      "agent": "codex",
+      "note": "REQUEST_CHANGES round 2. Remaining blocker: ctx.pool() could recycle a still-in-flight MMVQ temp into agg_scratch_alloc; peer-stream write would race main-stream MMVQ read. /tmp/v4-rowsplit-perf/code-review-2-output.txt"
+    },
+    {
+      "at": "2026-05-14",
+      "from": "implementing",
+      "to": "code-review",
+      "agent": "orchestrator",
+      "note": "Fixed: agg_scratch pre-allocated before MMVQ dispatch + ctx_after_mmvq event gates peer stream. Commit b469544f5."
+    },
+    {
+      "at": "2026-05-14",
+      "from": "code-review",
+      "to": "testing",
+      "agent": "codex",
+      "note": "APPROVE round 3. All blockers addressed. No new issues. /tmp/v4-rowsplit-perf/code-review-3-output.txt"
     }
   ]
 }
