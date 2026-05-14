@@ -2914,19 +2914,25 @@ static bool ggml_cuda_mul_mat_id_split_fast(
         char * scratch = agg_scratch_alloc[id].get();
         cudaStream_t peer_stream = ctx.stream(id, 0);
 
+        // CUDA events have device affinity (cudaEventCreate/Record uses the
+        // CURRENT device). Switch to the peer device for the create+record,
+        // since peer_stream lives on device `id`.
+        ggml_cuda_set_device(id);
+
         // Order peer-stream write-to-scratch after all ctx.stream() work so
         // far, in case ctx.pool() recycled a chunk that ctx.stream() is
-        // still reading from.
+        // still reading from. (cudaStreamWaitEvent is cross-device safe.)
         CUDA_CHECK(cudaStreamWaitEvent(peer_stream, ctx_after_mmvq, 0));
 
         CUDA_CHECK(cudaMemcpyPeerAsync(scratch, ctx.device,
                                        dst_temp_ptrs[id], id,
                                        dst_bytes, peer_stream));
-        // Record copy-done on peer stream; ctx.stream() waits on it before
-        // the add kernel reads scratch on ctx.device.
+        // Create + record copy-done on peer stream (peer device current).
         CUDA_CHECK(cudaEventCreateWithFlags(&copy_done_events[id], cudaEventDisableTiming));
         CUDA_CHECK(cudaEventRecord(copy_done_events[id], peer_stream));
 
+        // Now switch back to ctx.device for the add kernel launch on ctx.stream().
+        ggml_cuda_set_device(ctx.device);
         CUDA_CHECK(cudaStreamWaitEvent(ctx.stream(), copy_done_events[id], 0));
         mmid_split_add_into(dst_main, (const float *) scratch, dst_nelem, ctx.stream());
     }
