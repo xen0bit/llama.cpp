@@ -31,6 +31,8 @@
 
 # Claude Code metadata (local-only: task specs, skills, etc.)
 /.claude/
+/docs/plans/
+/tasks/
 /.idea/
 /.swiftpm
 /.vs/
