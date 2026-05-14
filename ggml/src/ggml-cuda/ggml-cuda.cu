@@ -932,7 +932,32 @@ static void * ggml_backend_cuda_split_buffer_get_base(ggml_backend_buffer_t buff
 }
 
 static enum ggml_status ggml_backend_cuda_split_buffer_init_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor) {
-    GGML_ASSERT(tensor->view_src == nullptr); // views of split tensors are not supported
+    // Views of cuda_split tensors are allowed when they are Tier-1 compatible:
+    //   - contiguous
+    //   - view_offs == 0
+    //   - covers the full parent (no sub-range)
+    // This matches the V4 case (dsv4_grouped_out reshapes wo_a before mul_mat_id),
+    // which inherits the parent's buffer pointer because views share buffer with
+    // their view_src. The view's extra aliases the root's extra (same per-device
+    // pointers) — no new allocation, and the destructor only frees the root once
+    // because views are not pushed into tensor_extras.
+    if (tensor->view_src != nullptr) {
+        ggml_tensor * root = tensor->view_src;
+        while (root->view_src) {
+            root = root->view_src;
+        }
+        GGML_ASSERT(ggml_is_contiguous(tensor) &&
+            "split-buffer views must be contiguous (no permute/transpose)");
+        GGML_ASSERT(tensor->view_offs == 0 &&
+            "split-buffer views must have view_offs == 0");
+        GGML_ASSERT(ggml_nelements(tensor) == ggml_nelements(root) &&
+            "split-buffer views must cover the full parent (no sub-range)");
+        GGML_ASSERT(root->extra != nullptr &&
+            "root tensor must be initialized before its views");
+        tensor->extra = root->extra;
+        return GGML_STATUS_SUCCESS;
+    }
+
     GGML_ASSERT(ggml_is_contiguous(tensor) && "split buffers only supported for contiguous tensors");
 
     ggml_backend_cuda_split_buffer_context * ctx = (ggml_backend_cuda_split_buffer_context *)buffer->context;
