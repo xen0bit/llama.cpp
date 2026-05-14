@@ -5154,6 +5154,21 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         }
     }
 
+    // Some ops write through a pre-allocated destination buffer that wasn't
+    // sched-allocated for this dispatch (e.g. GGML_OP_SET_ROWS into a KV cache).
+    // For those, the dst lives on a specific device — dispatching the op on a
+    // different device causes the CUDA kernel to write through a foreign-device
+    // pointer (dst->data), surfacing as cudaErrorIllegalAddress.
+    // Diagnosed via CUDA_LAUNCH_BLOCKING=1 + GGML_DSV4_DEBUG=1 on @DenisVASI9's
+    // 8x A100 rig: V4's dsv4_store_cache_rows emits SET_ROWS at layer-7 K-cache
+    // (on CUDA1) while sched dispatched on CUDA0 → illegal access.
+    if (op->buffer && ggml_backend_buft_is_cuda(op->buffer->buft)) {
+        ggml_backend_cuda_buffer_type_context * buft_ctx = (ggml_backend_cuda_buffer_type_context *)op->buffer->buft->context;
+        if (buft_ctx->device != dev_ctx->device) {
+            return false;
+        }
+    }
+
     switch (op->op) {
         case GGML_OP_UNARY:
             switch (ggml_get_unary_op(op)) {
