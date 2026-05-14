@@ -5126,12 +5126,27 @@ static ggml_backend_buffer_type_t ggml_backend_cuda_device_get_host_buffer_type(
 static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op) {
     ggml_backend_cuda_device_context * dev_ctx = (ggml_backend_cuda_device_context *) dev->context;
 
-    // split buffers can only be used with GGML_OP_MUL_MAT and DeepSeek V4 custom ops.
+    // split buffers can only be used with GGML_OP_MUL_MAT, DeepSeek V4 custom ops,
+    // and metadata-only ops (RESHAPE/VIEW/PERMUTE/TRANSPOSE — see ggml-cuda.cu
+    // dispatch which falls through with a bare break; they reinterpret shape/stride
+    // without launching a kernel, so they are safe on a per-device split slice).
+    // CONT/CPY/CONCAT/SET/etc. are intentionally not in this list because they
+    // launch real kernels that would touch the split storage and crash.
+    //
     // Without the DSV4 exception, multi-GPU scheduler rejects the V4 ops once their
     // weight tensors land in cuda_split buffers and falls back to CPU — which then
     // corrupts data via host<->device transfer mismatches and crashes during decode.
     // Reported and root-caused by @DenisVASI9 on an 8x A100 40GB rig.
+    //
+    // The metadata-op additions unblock --split-mode row at model load for V4
+    // (dsv4_grouped_out reshapes attn_output_a.weight before mul_mat_id). Note
+    // that mul_mat_id itself still asserts non-split (ggml-cuda.cu:2635), so
+    // full row-split inference for V4 requires separate kernel-level work.
     if (op->op != GGML_OP_MUL_MAT &&
+        op->op != GGML_OP_RESHAPE &&
+        op->op != GGML_OP_VIEW &&
+        op->op != GGML_OP_PERMUTE &&
+        op->op != GGML_OP_TRANSPOSE &&
         op->op != GGML_OP_DSV4_HC_SPLIT_SINKHORN &&
         op->op != GGML_OP_DSV4_HC_WEIGHTED_SUM &&
         op->op != GGML_OP_DSV4_HC_EXPAND &&
