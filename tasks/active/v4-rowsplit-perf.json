@@ -1,6 +1,6 @@
 {
   "id": "v4-rowsplit-perf",
-  "state": "testing",
+  "state": "failed",
   "spec_path": ".claude/agents/v4-rowsplit-perf.md",
   "plan_path": "docs/plans/v4-rowsplit-perf.md",
   "branch": "fix/v4-rowsplit-perf",
@@ -96,6 +96,27 @@
       "to": "testing",
       "agent": "codex",
       "note": "APPROVE round 3. All blockers addressed. No new issues. /tmp/v4-rowsplit-perf/code-review-3-output.txt"
+    },
+    {
+      "at": "2026-05-14",
+      "from": "testing",
+      "to": "implementing",
+      "agent": "orchestrator",
+      "note": "First gpudual run hit cudaErrorInvalidResourceHandle on cudaEventRecord(copy_done, peer_stream) — CUDA event device affinity issue. Fixed by ggml_cuda_set_device(id) before per-peer event create+record. Commit 47294cc7c."
+    },
+    {
+      "at": "2026-05-14",
+      "from": "implementing",
+      "to": "testing",
+      "agent": "orchestrator",
+      "note": "Rebuilt and re-ran on gpudual."
+    },
+    {
+      "at": "2026-05-14",
+      "from": "testing",
+      "to": "failed",
+      "agent": "orchestrator",
+      "note": "VALIDATION COMPLETE — FAIL per spec criteria. Results: (1) test-backend-ops -o DSV4_*: 19/19 pass on both GPUs (regression gate ✓). (2) Layer-split chat: 19.3 t/s decode (regression gate ≥18 ✓, unchanged). (3) Single-GPU CUDA_VISIBLE_DEVICES=0 + -ngl 999 -cmoe -ub 128: 11.8 t/s (works ✓). (4) Row-split chat (PRIMARY): coherent output, 9.7 t/s decode. Trace counter shows 3612 FAST calls vs 1 FALLBACK across the test request — fast path engaged on 99.97% of MMID calls. Verdict: 9.7 t/s < layer-split 19.3 t/s → FAIL per criteria. No PR. Root cause: V4 has MoE FFN gate/up/down MMIDs in EVERY layer (not just the V4 grouped attention). With row-split (cuda_split applied to every weight), every MMID requires per-device dispatch + aggregation; cumulative overhead per token exceeds layer-split's locality benefit. Fast path is a 19x correctness+speed improvement over the 0.5 t/s gather baseline, but for V4 decode at this model size, layer-split fundamentally wins. Branch fix/v4-rowsplit-perf at commit 47294cc7c left on origin/mine for reference; do NOT merge."
     }
   ]
 }
