@@ -870,17 +870,24 @@ static dsv4_decode_compressor dsv4_build_compressor_decode_projected(
     const bool should_compress = (pos + 1) % compress_ratio == 0;
 
     // Single-row write via cpy-into-view. ggml_set_rows would crash on
-    // multi-GPU (sched routes by src device, dst is on a different device);
-    // see dsv4_store_cache_rows for the same problem and fix.
-    // ggml_cpy returns a view-of-dst with op=GGML_OP_CPY and src[0]=src, so
-    // downstream consumers of kv_state/score_state get a proper data
-    // dependency on the cpy without needing ggml_build_forward_expand here.
+    // multi-GPU (sched routes by src device while dst is on a different
+    // device; see dsv4_store_cache_rows for the same problem and fix).
+    //
+    // We need to return a FULL-shape view of dst (downstream code at
+    // dsv4_view_cols slices the full state by columns/rows) AND establish
+    // a data dependency on the cpy. We mimic ggml_set_rows's internal
+    // construction: create a view_tensor of dst (which inherits dst's full
+    // shape), then manually set src[0] to the cpy result so sched orders
+    // the cpy before any consumer reading from this view.
     auto cpy_into_row = [&](ggml_tensor * dst, ggml_tensor * row_src) -> ggml_tensor * {
-        ggml_tensor * view = ggml_view_2d(ctx, dst,
+        ggml_tensor * row_view = ggml_view_2d(ctx, dst,
                 dst->ne[0], 1,
                 dst->nb[1],
                 row * dst->nb[1]);
-        return ggml_cpy(ctx, row_src, view);
+        ggml_tensor * cpy = ggml_cpy(ctx, row_src, row_view);
+        ggml_tensor * full_state = ggml_view_tensor(ctx, dst);
+        full_state->src[0] = cpy;  // dependency: full_state's consumers wait for cpy
+        return full_state;
     };
     ggml_tensor * kv_state    = cpy_into_row(prev_kv_state,    kv_cur);
     ggml_tensor * score_state = cpy_into_row(prev_score_state, sc_cur);
