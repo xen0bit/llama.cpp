@@ -322,6 +322,7 @@ extern "C" {
         bool ssd_stream;      // CPU MoE expert streaming: don't prefetch the whole
                               // model at load (demand-page experts) and mlock the
                               // non-routed weights so paging can't evict them
+        const char * ssd_stream_hotlist; // path to expert hotlist file for pinning
     };
 
     struct llama_sampler_seq_config {

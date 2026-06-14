@@ -205,4 +205,9 @@ struct llama_model_loader {
     std::string ftype_name() const;
 
     void print_info() const;
+
+    // --ssd-stream-hotlist: pin the hottest routed expert slices resident.
+    // Parses a profiler-output hotlist file and mlocks the top-K expert slices
+    // that fit within the mlock budget. No-op if ssd_stream is false.
+    void pin_hot_experts(const char * hotlist_path);
 };

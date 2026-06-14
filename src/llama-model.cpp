@@ -1552,6 +1552,14 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
+    // --ssd-stream-hotlist: pin the hottest routed expert slices resident so
+    // they survive page-cache pressure on low-RAM machines. The hotlist is a
+    // profiler output file (one "layer expert count" per line, sorted by count
+    // descending). We mlock the top-K slices that fit within the budget.
+    if (params.ssd_stream_hotlist && params.ssd_stream_hotlist[0]) {
+        ml.pin_hot_experts(params.ssd_stream_hotlist);
+    }
+
     return true;
 }
 
@@ -2200,6 +2208,7 @@ llama_model_params llama_model_default_params() {
         /*.no_host                     =*/ false,
         /*.no_alloc                    =*/ false,
         /*.ssd_stream                  =*/ false,
+        /*.ssd_stream_hotlist          =*/ nullptr,
     };
 
     return result;

@@ -12,6 +12,8 @@
 #include <cstring>
 #include <future>
 #include <regex>
+#include <cstdio>
+#include <unordered_map>
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/mman.h> // mlock for LLAMA_MLOCK_NONROUTED streaming mode
@@ -1715,4 +1717,87 @@ void llama_model_loader::print_info() const {
     } else {
         LLAMA_LOG_INFO("%s: file size   = %.2f GiB (%.2f BPW) \n", __func__, n_bytes/1024.0/1024.0/1024.0, n_bytes*8.0/n_elements);
     }
+}
+
+void llama_model_loader::pin_hot_experts(const char * hotlist_path) {
+    if (!ssd_stream) {
+        return;
+    }
+    if (!hotlist_path || !hotlist_path[0]) {
+        return;
+    }
+
+    // Parse hotlist: "layer expert count" per line, sorted descending by count.
+    // We'll pin the top-K that fit within the mlock budget.
+    struct hot_entry { int layer, expert; };
+    std::vector<hot_entry> hot;
+    {
+        FILE * f = fopen(hotlist_path, "r");
+        if (!f) {
+            LLAMA_LOG_WARN("%s: cannot open hotlist '%s': %s\n", __func__, hotlist_path, strerror(errno));
+            return;
+        }
+        char buf[256];
+        while (fgets(buf, sizeof(buf), f)) {
+            if (buf[0] == '#') continue;
+            int layer = -1, expert = -1;
+            unsigned long long cnt = 0;
+            if (sscanf(buf, "%d %d %llu", &layer, &expert, &cnt) >= 2) {
+                if (layer >= 0 && expert >= 0) {
+                    hot.push_back({layer, expert});
+                }
+            }
+        }
+        fclose(f);
+    }
+
+    if (hot.empty()) {
+        LLAMA_LOG_WARN("%s: hotlist '%s' is empty or unreadable\n", __func__, hotlist_path);
+        return;
+    }
+
+    LLAMA_LOG_INFO("%s: pinning up to %zu hot expert slices from '%s'\n", __func__, hot.size(), hotlist_path);
+
+    // Build a map: (layer, tensor_name_prefix) -> tensor pointer + expert stride.
+    // We iterate all tensors in all contexts.
+    struct expert_tensor {
+        ggml_tensor * t;
+        int64_t       n_expert;
+        size_t        slice_bytes; // nb02 = bytes per expert slice
+    };
+    std::unordered_map<int, std::vector<expert_tensor>> layer_exps;
+
+    for (const auto & [_, ctx_ptr] : ctx_map) {
+        for (ggml_tensor * cur = ggml_get_first_tensor(ctx_ptr.get());
+             cur; cur = ggml_get_next_tensor(ctx_ptr.get(), cur)) {
+            const char * name = ggml_get_name(cur);
+            if (!strstr(name, "_exps")) continue;
+            int layer = -1;
+            if (sscanf(name, "blk.%d.", &layer) != 1 || layer < 0) continue;
+            layer_exps[layer].push_back({cur, (int) cur->ne[2], (size_t) cur->nb[2]});
+        }
+    }
+
+    size_t pinned = 0, failed = 0;
+    for (const auto & he : hot) {
+        auto it = layer_exps.find(he.layer);
+        if (it == layer_exps.end()) continue;
+        for (const auto & et : it->second) {
+            if (he.expert >= et.n_expert) continue;
+            uint8_t * slice = (uint8_t *) et.t->data + he.expert * et.slice_bytes;
+            if (mlock(slice, et.slice_bytes) == 0) {
+                pinned++;
+            } else {
+                // One failure likely means the mlock limit is hit; stop trying.
+                if (failed == 0) {
+                    LLAMA_LOG_WARN("%s: mlock limit hit at expert %d layer %d: %s\n",
+                                   __func__, he.expert, he.layer, strerror(errno));
+                }
+                failed++;
+                goto done; // out of the double loop
+            }
+        }
+    }
+done:
+    LLAMA_LOG_INFO("%s: pinned %zu expert slices (failed %zu)\n", __func__, pinned, failed);
 }

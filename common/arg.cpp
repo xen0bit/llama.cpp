@@ -2249,6 +2249,17 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_SSD_STREAM"));
     add_opt(common_arg(
+        {"--ssd-stream-hotlist"}, "HOTLIST",
+        "path to expert hotlist file (from LLAMA_EXPERT_PROFILE) for pinning the "
+        "hottest routed expert slices resident. Best with --ssd-stream. "
+        "The hotlist is a text file with one 'layer expert count' per line, "
+        "sorted by count descending. Only the top-K that fit within the mlock "
+        "budget are pinned.",
+        [](common_params & params, const std::string & value) {
+            params.ssd_stream_hotlist = value;
+        }
+    ).set_env("LLAMA_ARG_SSD_STREAM_HOTLIST"));
+    add_opt(common_arg(
         {"--mmap"},
         {"--no-mmap"},
         string_format("whether to memory-map model. (if mmap disabled, slower load but may reduce pageouts if not using mlock) (default: %s)", params.use_mmap ? "enabled" : "disabled"),
