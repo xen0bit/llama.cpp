@@ -1773,6 +1773,12 @@ void llama_model_loader::pin_hot_experts(const char * hotlist_path) {
         return;
     }
 
+    const size_t cache_budget_bytes = (ssd_cache_gib > 0.0f)
+        ? (size_t)(ssd_cache_gib * 1073741824ULL)
+        : (size_t)-1; // no limit
+    if (ssd_cache_gib > 0.0f) {
+        LLAMA_LOG_INFO("%s: expert cache budget = %.1f GiB\n", __func__, ssd_cache_gib);
+    }
     LLAMA_LOG_INFO("%s: pinning up to %zu hot expert slices from '%s'\n", __func__, hot.size(), hotlist_path);
 
     // Build a map: (layer, tensor_name_prefix) -> tensor pointer + expert stride.
@@ -1798,6 +1804,7 @@ void llama_model_loader::pin_hot_experts(const char * hotlist_path) {
     }
 
     size_t pinned = 0, failed = 0;
+    size_t budget_used = 0;
     for (const auto & he : hot) {
         auto it = layer_exps.find(he.layer);
         if (it == layer_exps.end()) continue;
@@ -1806,7 +1813,17 @@ void llama_model_loader::pin_hot_experts(const char * hotlist_path) {
             uint8_t * slice = (uint8_t *) et.t->data;
             if (!slice) continue; // tensor data not yet allocated
             slice += he.expert * et.slice_bytes;
+            // --ssd-stream-cache budget check (hot entries are sorted by
+            // frequency descending, so we naturally pin the most valuable first)
+            if (budget_used + et.slice_bytes > cache_budget_bytes) {
+                if (ssd_cache_gib > 0.0f) {
+                    LLAMA_LOG_INFO("%s: hit expert cache budget at %.2f GiB\n",
+                                   __func__, budget_used / 1073741824.0);
+                    goto done;
+                }
+            }
             if (mlock(slice, et.slice_bytes) == 0) {
+                budget_used += et.slice_bytes;
                 pinned++;
             } else {
                 // EPERM → no CAP_IPC_LOCK; fall back to WILLNEED (prefault into
@@ -1815,6 +1832,7 @@ void llama_model_loader::pin_hot_experts(const char * hotlist_path) {
 #ifdef POSIX_MADV_WILLNEED
                     posix_madvise(slice, et.slice_bytes, POSIX_MADV_WILLNEED);
 #endif
+                    budget_used += et.slice_bytes;
                     pinned++;
                     continue;
                 }

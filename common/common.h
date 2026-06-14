@@ -537,6 +537,7 @@ struct common_params {
     bool use_mlock         = false; // use mlock to keep model in memory
     bool ssd_stream        = false; // CPU MoE expert streaming (demand-page experts, mlock non-routed)
     std::string ssd_stream_hotlist;  // path to expert hotlist for pinning
+    float ssd_stream_cache  = 0.0f; // max GiB of expert cache to pin (0 = auto)
     bool verbose_prompt    = false; // print prompt tokens before generation
     bool display_prompt    = true;  // print prompt before generation
     bool no_kv_offload     = false; // disable KV offloading

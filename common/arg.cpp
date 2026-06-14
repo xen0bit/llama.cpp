@@ -2260,6 +2260,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_SSD_STREAM_HOTLIST"));
     add_opt(common_arg(
+        {"--ssd-stream-cache"}, "GiB",
+        "max GiB of expert cache to pin with --ssd-stream-hotlist (default: 0 = auto, "
+        "fill up to ulimit -l or physical RAM). Expert slices are pinned from hottest "
+        "to coldest; the profiler's LRU coverage curve tells you the hit rate at each "
+        "budget. E.g. '8' for 8 GiB of expert cache, '16' for 16 GiB.",
+        [](common_params & params, const std::string & value) {
+            params.ssd_stream_cache = std::atof(value.c_str());
+        }
+    ).set_env("LLAMA_ARG_SSD_STREAM_CACHE"));
+    add_opt(common_arg(
         {"--mmap"},
         {"--no-mmap"},
         string_format("whether to memory-map model. (if mmap disabled, slower load but may reduce pageouts if not using mlock) (default: %s)", params.use_mmap ? "enabled" : "disabled"),

@@ -323,6 +323,7 @@ extern "C" {
                               // model at load (demand-page experts) and mlock the
                               // non-routed weights so paging can't evict them
         const char * ssd_stream_hotlist; // path to expert hotlist file for pinning
+        float   ssd_stream_cache;      // max GiB of expert cache to pin (0 = auto, no limit)
     };
 
     struct llama_sampler_seq_config {

@@ -1417,6 +1417,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     // also disables warmup, which would otherwise route through all experts and
     // fault every one.
     ml.ssd_stream = params.ssd_stream;
+    ml.ssd_cache_gib = params.ssd_stream_cache;
     ml.init_mappings(/*prefetch=*/ !params.ssd_stream, use_mlock ? &pimpl->mlock_mmaps : nullptr);
     pimpl->mappings.reserve(ml.mappings.size());
 
@@ -2209,6 +2210,7 @@ llama_model_params llama_model_default_params() {
         /*.no_alloc                    =*/ false,
         /*.ssd_stream                  =*/ false,
         /*.ssd_stream_hotlist          =*/ nullptr,
+        /*.ssd_stream_cache            =*/ 0.0f,
     };
 
     return result;
