@@ -2238,6 +2238,17 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_MLOCK"));
     add_opt(common_arg(
+        {"--ssd-stream"},
+        "CPU MoE expert streaming: don't load the whole model into RAM at startup "
+        "(demand-page routed experts from disk) and mlock the non-routed weights so "
+        "paging can't evict them. For running models larger than RAM from a fast SSD. "
+        "Implies --no-warmup. Best with mmap enabled (the default).",
+        [](common_params & params) {
+            params.ssd_stream = true;
+            params.warmup     = false; // warmup routes through all experts, faulting every one
+        }
+    ).set_env("LLAMA_ARG_SSD_STREAM"));
+    add_opt(common_arg(
         {"--mmap"},
         {"--no-mmap"},
         string_format("whether to memory-map model. (if mmap disabled, slower load but may reduce pageouts if not using mlock) (default: %s)", params.use_mmap ? "enabled" : "disabled"),

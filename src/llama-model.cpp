@@ -1411,7 +1411,13 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
-    ml.init_mappings(true, use_mlock ? &pimpl->mlock_mmaps : nullptr);
+    // Expert-streaming mode (--ssd-stream): don't MAP_POPULATE the whole model
+    // at load so MoE experts demand-page on first access; mlock the non-routed
+    // weights (handled in load_all_data) so paging can't evict them. The CLI
+    // also disables warmup, which would otherwise route through all experts and
+    // fault every one.
+    ml.ssd_stream = params.ssd_stream;
+    ml.init_mappings(/*prefetch=*/ !params.ssd_stream, use_mlock ? &pimpl->mlock_mmaps : nullptr);
     pimpl->mappings.reserve(ml.mappings.size());
 
     // create the backend buffers
@@ -2193,6 +2199,7 @@ llama_model_params llama_model_default_params() {
         /*.use_extra_bufts             =*/ true,
         /*.no_host                     =*/ false,
         /*.no_alloc                    =*/ false,
+        /*.ssd_stream                  =*/ false,
     };
 
     return result;

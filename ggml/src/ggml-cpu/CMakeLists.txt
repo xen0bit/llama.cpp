@@ -37,6 +37,8 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
         ggml-cpu/quants.h
         ggml-cpu/traits.cpp
         ggml-cpu/traits.h
+        ggml-cpu/expert-profile.cpp
+        ggml-cpu/expert-profile.h
         ggml-cpu/amx/amx.cpp
         ggml-cpu/amx/amx.h
         ggml-cpu/amx/mmq.cpp

@@ -4,6 +4,7 @@
 #include "ggml-backend-impl.h"
 #include "ggml-backend.h"
 #include "traits.h"
+#include "expert-profile.h"
 #include "ggml-cpu-impl.h"
 #include "ggml-impl.h"
 #include "quants.h"
@@ -1551,6 +1552,12 @@ static void ggml_compute_forward_mul_mat_id(
     // row groups
     const int n_ids = ids->ne[0]; // n_expert_used
     const int n_as  = ne02;       // n_expert
+
+    // optional MoE expert-hotness profiler (no-op unless LLAMA_EXPERT_PROFILE set)
+    if (ith == 0) {
+        ggml_expert_profile_record(src0->name, n_as, ids->data,
+                                   ids->ne[0], ids->ne[1], ids->nb[0], ids->nb[1]);
+    }
 
     void * wdata_cur = params->wdata;
 

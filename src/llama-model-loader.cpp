@@ -13,6 +13,10 @@
 #include <future>
 #include <regex>
 
+#if defined(__linux__) || defined(__APPLE__)
+#include <sys/mman.h> // mlock for LLAMA_MLOCK_NONROUTED streaming mode
+#endif
+
 static const size_t kiB = 1024;
 static const size_t MiB = 1024*kiB;
 static const size_t GiB = 1024*MiB;
@@ -1552,6 +1556,24 @@ bool llama_model_loader::load_all_data(
                 auto & mmap_used = mmaps_used[weight->idx];
                 mmap_used.first  = std::min(mmap_used.first,  weight->offs);
                 mmap_used.second = std::max(mmap_used.second, weight->offs + n_size);
+
+#if defined(__linux__) || defined(__APPLE__)
+                // --ssd-stream: pin the non-routed weights (everything except the
+                // routed MoE experts "*_exps") so demand-paging of experts can't
+                // evict tensors used on every token (attention, shared expert,
+                // embeddings, norms). Best-effort: large non-routed sets may
+                // exceed RLIMIT_MEMLOCK (raise `ulimit -l`).
+                if (ssd_stream && strstr(ggml_get_name(cur), "_exps") == nullptr) {
+                    if (mlock(data, n_size) != 0) {
+                        static bool warned = false;
+                        if (!warned) {
+                            warned = true;
+                            LLAMA_LOG_WARN("%s: mlock of non-routed weights hit a limit "
+                                "(raise `ulimit -l`): %s\n", __func__, strerror(errno));
+                        }
+                    }
+                }
+#endif
             } else {
                 ggml_backend_tensor_set(cur, data, 0, n_size);
             }

@@ -448,9 +448,12 @@ struct llama_mmap::impl {
         int flags = MAP_SHARED;
         if (numa) { prefetch = 0; }
 #ifdef __linux__
-        if (posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL)) {
-            LLAMA_LOG_WARN("warning: posix_fadvise(.., POSIX_FADV_SEQUENTIAL) failed: %s\n",
-                    strerror(errno));
+        // prefetch == 0 is the streaming/demand-paging mode (e.g. MoE experts
+        // loaded on access): advise RANDOM so the kernel doesn't read ahead and
+        // skip MAP_POPULATE so the whole file isn't pulled into RAM at load.
+        const int fadv = prefetch ? POSIX_FADV_SEQUENTIAL : POSIX_FADV_RANDOM;
+        if (posix_fadvise(fd, 0, 0, fadv)) {
+            LLAMA_LOG_WARN("warning: posix_fadvise(..) failed: %s\n", strerror(errno));
         }
         if (prefetch) { flags |= MAP_POPULATE; }
 #endif
@@ -465,7 +468,7 @@ struct llama_mmap::impl {
                         strerror(errno));
             }
         }
-        if (numa) {
+        if (numa || prefetch == 0) {
             if (posix_madvise(addr, file->size(), POSIX_MADV_RANDOM)) {
                 LLAMA_LOG_WARN("warning: posix_madvise(.., POSIX_MADV_RANDOM) failed: %s\n",
                         strerror(errno));
