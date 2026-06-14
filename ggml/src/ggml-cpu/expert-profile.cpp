@@ -130,6 +130,20 @@ struct profiler {
         fclose(f);
         fprintf(stderr, "ggml: wrote expert profile to %s (%llu selections, %zu units)\n",
                 out_path.c_str(), (unsigned long long) total_selections, v.size());
+
+        // Write companion .hotlist (sorted "layer expert" lines, no comments) for
+        // auto-discovery with --ssd-stream. The loader looks for <model>.hotlist.
+        const std::string hotlist_path = out_path + ".hotlist";
+        FILE * fh = fopen(hotlist_path.c_str(), "w");
+        if (fh) {
+            for (const auto & kv : v) {
+                fprintf(fh, "%u %u\n", (uint32_t) (kv.first >> 32),
+                        (uint32_t) (kv.first & 0xffffffffu));
+            }
+            fclose(fh);
+            fprintf(stderr, "ggml: wrote hotlist companion to %s (%zu units)\n",
+                    hotlist_path.c_str(), v.size());
+        }
     }
 };
 

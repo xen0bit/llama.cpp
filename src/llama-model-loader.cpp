@@ -542,6 +542,9 @@ llama_model_loader::llama_model_loader(
     tensor_buft_overrides = param_tensor_buft_overrides_p;
 
     if (!fname.empty()) {
+        // Store for auto-hotlist discovery
+        ssd_model_path = fname;
+
         // Load the main GGUF
         struct ggml_context * ctx = NULL;
         struct gguf_init_params params = {
@@ -1723,8 +1726,16 @@ void llama_model_loader::pin_hot_experts(const char * hotlist_path) {
     if (!ssd_stream) {
         return;
     }
+
+    // Auto-discover: when no explicit hotlist, derive from model path
+    std::string resolved;
     if (!hotlist_path || !hotlist_path[0]) {
-        return;
+        if (!ssd_model_path.empty()) {
+            resolved = ssd_model_path + ".hotlist";
+            hotlist_path = resolved.c_str();
+        } else {
+            return;
+        }
     }
 
     // Parse hotlist: "layer expert count" per line, sorted descending by count.
@@ -1768,7 +1779,9 @@ void llama_model_loader::pin_hot_experts(const char * hotlist_path) {
     std::unordered_map<int, std::vector<expert_tensor>> layer_exps;
 
     for (const auto & [_, ctx_ptr] : ctx_map) {
-        for (ggml_tensor * cur = ggml_get_first_tensor(ctx_ptr.get());
+        auto * ctx = ctx_ptr.get();
+        if (!ctx) continue;
+        for (ggml_tensor * cur = ggml_get_first_tensor(ctx);
              cur; cur = ggml_get_next_tensor(ctx_ptr.get(), cur)) {
             const char * name = ggml_get_name(cur);
             if (!strstr(name, "_exps")) continue;
@@ -1784,7 +1797,9 @@ void llama_model_loader::pin_hot_experts(const char * hotlist_path) {
         if (it == layer_exps.end()) continue;
         for (const auto & et : it->second) {
             if (he.expert >= et.n_expert) continue;
-            uint8_t * slice = (uint8_t *) et.t->data + he.expert * et.slice_bytes;
+            uint8_t * slice = (uint8_t *) et.t->data;
+            if (!slice) continue; // tensor data not yet allocated
+            slice += he.expert * et.slice_bytes;
             if (mlock(slice, et.slice_bytes) == 0) {
                 pinned++;
             } else {

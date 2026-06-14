@@ -80,6 +80,7 @@ struct llama_model_loader {
     bool check_tensors;
     bool no_alloc;
     bool ssd_stream = false; // --ssd-stream: mlock non-routed weights (set by load_tensors)
+    std::string ssd_model_path;  // model file path for auto-hotlist discovery
 
     llama_files files;
     llama_ftype ftype;

@@ -1,5 +1,10 @@
 # Tier-2: routed-expert SSD-streaming cache (CPU)
 
+> **Status update (2026-06-14):** Stage 2a (streaming foundation) and Stage 2b
+> (hotlist pinning) are shipped behind `--ssd-stream` / `--ssd-stream-hotlist`.
+> The O_DIRECT arena, clock eviction, and async prefetch described below remain
+> forward-looking design. See `perf/README.md` for shipped features and workflow.
+
 Design for streaming the routed MoE experts of `DeepSeek-V4-Flash-...-Q2-REAP-ds4`
 from a fast SSD instead of requiring the whole 52.6 GB model in RAM, so the
 machine's RAM becomes a continuous speed knob rather than a hard cutoff.
@@ -199,9 +204,8 @@ rate — that's the lever that turns 1.74 GB/token into a small fraction.
 ---
 
 ## 8. Implementation order
-1. (2a) tensor-name classifier + per-tensor `mlock` of non-routed; confirm
-   resident set & no eviction of attention under load. Re-measure bytes/token.
-2. (2a) router-`ids` profiler → hotlist file; pinned hot set; predictive
+1. ~~(2a) tensor-name classifier + per-tensor `mlock` of non-routed~~ ✅ `--ssd-stream`
+2. ~~(2a) router-`ids` profiler → hotlist file; pinned hot set~~ ✅ `LLAMA_EXPERT_PROFILE` + `--ssd-stream-hotlist`
    `WILLNEED` prefetch thread. Re-measure.
 3. (2b) streaming buft + loader hook (record offsets, don't load exps) behind
    `--ssd-expert-cache`; `compute_forward` forked from `mul_mat_id` with
