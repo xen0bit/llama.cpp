@@ -1566,16 +1566,22 @@ bool llama_model_loader::load_all_data(
                 // --ssd-stream: pin the non-routed weights (everything except the
                 // routed MoE experts "*_exps") so demand-paging of experts can't
                 // evict tensors used on every token (attention, shared expert,
-                // embeddings, norms). Best-effort: large non-routed sets may
-                // exceed RLIMIT_MEMLOCK (raise `ulimit -l`).
+                // embeddings, norms). Best-effort: falls back to MADV_WILLNEED
+                // when mlock is not permitted (no CAP_IPC_LOCK / ulimit -l).
                 if (ssd_stream && strstr(ggml_get_name(cur), "_exps") == nullptr) {
                     if (mlock(data, n_size) != 0) {
-                        static bool warned = false;
-                        if (!warned) {
-                            warned = true;
+                        static bool mlock_warned = false;
+                        if (!mlock_warned) {
+                            mlock_warned = true;
                             LLAMA_LOG_WARN("%s: mlock of non-routed weights hit a limit "
                                 "(raise `ulimit -l`): %s\n", __func__, strerror(errno));
                         }
+                        // Fallback: fault pages into page cache (best-effort, no root).
+                        // MADV_WILLNEED is a hint; pages may still be evicted under
+                        // memory pressure.
+#ifdef POSIX_MADV_WILLNEED
+                        posix_madvise(data, n_size, POSIX_MADV_WILLNEED);
+#endif
                     }
                 }
 #endif
@@ -1803,13 +1809,22 @@ void llama_model_loader::pin_hot_experts(const char * hotlist_path) {
             if (mlock(slice, et.slice_bytes) == 0) {
                 pinned++;
             } else {
+                // EPERM → no CAP_IPC_LOCK; fall back to WILLNEED (prefault into
+                // page cache, best-effort, no root required).
+                if (errno == EPERM || errno == EAGAIN) {
+#ifdef POSIX_MADV_WILLNEED
+                    posix_madvise(slice, et.slice_bytes, POSIX_MADV_WILLNEED);
+#endif
+                    pinned++;
+                    continue;
+                }
                 // One failure likely means the mlock limit is hit; stop trying.
                 if (failed == 0) {
                     LLAMA_LOG_WARN("%s: mlock limit hit at expert %d layer %d: %s\n",
                                    __func__, he.expert, he.layer, strerror(errno));
                 }
                 failed++;
-                goto done; // out of the double loop
+                goto done;
             }
         }
     }
