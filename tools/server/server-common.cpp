@@ -9,6 +9,8 @@
 
 #include "server-common.h"
 
+#include <algorithm>
+#include <cmath>
 #include <random>
 #include <sstream>
 #include <fstream>
@@ -1468,6 +1470,258 @@ json format_embeddings_response_oaicompat(
     };
 
     return res;
+}
+
+//
+// system one API
+//
+
+static json systemone_error(const json & loc, const std::string & msg, const std::string & type) {
+    return json{
+        {"loc",  loc},
+        {"msg",  msg},
+        {"type", type},
+    };
+}
+
+static json systemone_loc(std::initializer_list<common_json_value> path) {
+    json loc = json::array({"body"});
+    for (const auto & p : path) {
+        loc.push_back(p);
+    }
+    return loc;
+}
+
+// instructions and descriptions accept a string, an object, an array or null
+static bool systemone_is_entry(const json & v) {
+    return v.is_null() || v.is_string() || v.is_object() || v.is_array();
+}
+
+json systemone_parse_request(const json & body, size_t max_options, std::vector<systemone_question> & out) {
+    json errors = json::array();
+    out.clear();
+
+    if (!body.is_object()) {
+        errors.push_back(systemone_error(json::array({"body"}), "Input should be a valid dictionary", "dict_type"));
+        return errors;
+    }
+
+    if (!body.contains("state")) {
+        errors.push_back(systemone_error(systemone_loc({"state"}), "Field required", "missing"));
+    } else {
+        const json & state = body.at("state");
+        if (!state.is_string() && !state.is_object() && !state.is_array()) {
+            errors.push_back(systemone_error(systemone_loc({"state"}), "Input should be a string, object or array", "value_error"));
+        }
+    }
+
+    if (!body.contains("model")) {
+        errors.push_back(systemone_error(systemone_loc({"model"}), "Field required", "missing"));
+    } else if (!body.at("model").is_string()) {
+        errors.push_back(systemone_error(systemone_loc({"model"}), "Input should be a valid string", "string_type"));
+    }
+
+    if (!body.contains("questions")) {
+        errors.push_back(systemone_error(systemone_loc({"questions"}), "Field required", "missing"));
+        return errors;
+    }
+
+    const json & questions = body.at("questions");
+    if (!questions.is_object()) {
+        errors.push_back(systemone_error(systemone_loc({"questions"}), "Input should be a valid dictionary", "dict_type"));
+        return errors;
+    }
+    if (questions.empty()) {
+        errors.push_back(systemone_error(systemone_loc({"questions"}), "At least one question is required", "too_short"));
+        return errors;
+    }
+
+    for (const auto & [id, q] : questions.items()) {
+        systemone_question cur;
+        cur.id = id;
+
+        if (!q.is_object()) {
+            errors.push_back(systemone_error(systemone_loc({"questions", id}), "Input should be a valid dictionary", "dict_type"));
+            continue;
+        }
+
+        cur.type = q.contains("type") && q.at("type").is_string() ? q.at("type").get<std::string>() : "";
+        if (cur.type != "noul" && cur.type != "choice" && cur.type != "score") {
+            errors.push_back(systemone_error(systemone_loc({"questions", id, "type"}), "Input should be 'noul', 'choice' or 'score'", "union_tag_invalid"));
+            continue;
+        }
+
+        cur.instructions = q.value("instructions", json());
+        if (!systemone_is_entry(cur.instructions)) {
+            errors.push_back(systemone_error(systemone_loc({"questions", id, "instructions"}), "Input should be a string, object, array or null", "value_error"));
+        }
+
+        const bool has_criteria = q.contains("criteria") && !q.at("criteria").is_null();
+
+        if (cur.type == "noul") {
+            cur.names = {"yes", "no"};
+            cur.descriptions = {json(), json()};
+            if (has_criteria) {
+                const json & criteria = q.at("criteria");
+                if (!criteria.is_object()) {
+                    errors.push_back(systemone_error(systemone_loc({"questions", id, "criteria"}), "Input should be a valid dictionary", "dict_type"));
+                    continue;
+                }
+                const char * keys[] = {"true", "false"};
+                for (size_t i = 0; i < 2; i++) {
+                    cur.descriptions[i] = criteria.value(keys[i], json());
+                    if (!systemone_is_entry(cur.descriptions[i])) {
+                        errors.push_back(systemone_error(systemone_loc({"questions", id, "criteria", keys[i]}), "Input should be a string, object, array or null", "value_error"));
+                    }
+                }
+            }
+        } else if (!has_criteria) {
+            errors.push_back(systemone_error(systemone_loc({"questions", id, "criteria"}), "Field required", "missing"));
+            continue;
+        } else if (cur.type == "choice") {
+            const json & criteria = q.at("criteria");
+            if (!criteria.is_object()) {
+                errors.push_back(systemone_error(systemone_loc({"questions", id, "criteria"}), "Input should be a valid dictionary", "dict_type"));
+                continue;
+            }
+            for (const auto & [name, desc] : criteria.items()) {
+                if (!systemone_is_entry(desc)) {
+                    errors.push_back(systemone_error(systemone_loc({"questions", id, "criteria", name}), "Input should be a string, object, array or null", "value_error"));
+                }
+                cur.names.push_back(name);
+                cur.descriptions.push_back(desc);
+            }
+        } else {
+            const json & criteria = q.at("criteria");
+            if (!criteria.is_array()) {
+                errors.push_back(systemone_error(systemone_loc({"questions", id, "criteria"}), "Input should be a valid list", "list_type"));
+                continue;
+            }
+            for (size_t i = 0; i < criteria.size(); i++) {
+                if (!systemone_is_entry(criteria.at(i)) || criteria.at(i).is_null()) {
+                    errors.push_back(systemone_error(systemone_loc({"questions", id, "criteria", i}), "Input should be a string, object or array", "value_error"));
+                }
+                cur.names.push_back(std::to_string(i));
+                cur.descriptions.push_back(criteria.at(i));
+            }
+        }
+
+        if (cur.names.size() < 2) {
+            errors.push_back(systemone_error(systemone_loc({"questions", id, "criteria"}), "At least two options are required", "too_short"));
+        } else if (cur.names.size() > max_options) {
+            errors.push_back(systemone_error(systemone_loc({"questions", id, "criteria"}), string_format("At most %zu options are supported by this model", max_options), "too_long"));
+        }
+
+        out.push_back(std::move(cur));
+    }
+
+    return errors;
+}
+
+std::string systemone_format_system(const json & state) {
+    return "Evaluate the state below. The next message asks one question about it and lists the allowed options. "
+           "Reply with only the label of the best option, with no explanation.\n\n"
+           "State:\n" + (state.is_string() ? state.get<std::string>() : state.dump());
+}
+
+std::string systemone_format_user(const systemone_question & q, const std::vector<std::string> & labels, bool reverse) {
+    const size_t n = q.names.size();
+
+    json options = json::object();
+    for (size_t j = 0; j < n; j++) {
+        const size_t i = reverse ? n - 1 - j : j;
+        const std::string & label = labels[j];
+        if (q.type == "score") {
+            options[label] = q.descriptions[i];
+        } else if (q.descriptions[i].is_null()) {
+            options[label] = q.names[i];
+        } else {
+            options[label] = json{
+                {"name",        q.names[i]},
+                {"description", q.descriptions[i]},
+            };
+        }
+    }
+
+    json msg = json::object();
+    if (!q.instructions.is_null()) {
+        msg["question"] = q.instructions;
+    }
+    if (q.type == "score") {
+        msg["scale"] = std::string("options are ordered levels, from ") + (reverse ? "highest" : "lowest") + " (" + labels.front() + ") to " + (reverse ? "lowest" : "highest") + " (" + labels[n - 1] + ")";
+    }
+    msg["options"] = options;
+
+    return msg.dump();
+}
+
+json systemone_format_answer(const systemone_question & q, const std::vector<std::vector<float>> & logits) {
+    GGML_ASSERT(!logits.empty());
+
+    const size_t n = q.names.size();
+
+    std::vector<double> probs(n, 0.0);
+    for (const auto & pass : logits) {
+        GGML_ASSERT(pass.size() == n && n >= 2);
+
+        const float max_logit = *std::max_element(pass.begin(), pass.end());
+
+        std::vector<double> cur(n);
+        double sum = 0.0;
+        for (size_t i = 0; i < n; i++) {
+            cur[i] = std::exp((double) pass[i] - max_logit);
+            sum += cur[i];
+        }
+        for (size_t i = 0; i < n; i++) {
+            probs[i] += cur[i] / sum / logits.size();
+        }
+    }
+
+    size_t best = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (probs[i] > probs[best]) {
+            best = i;
+        }
+    }
+
+    if (q.type == "noul") {
+        return json{
+            {"type", "noul"},
+            {"noul", probs[0]},
+        };
+    }
+
+    // rescale the top probability so that a uniform distribution gives 0
+    const double confidence = (probs[best] - 1.0 / n) / (1.0 - 1.0 / n);
+
+    json probabilities = json::object();
+    for (size_t i = 0; i < n; i++) {
+        probabilities[q.names[i]] = probs[i];
+    }
+
+    if (q.type == "choice") {
+        return json{
+            {"type",          "choice"},
+            {"choice",        q.names[best]},
+            {"probabilities", probabilities},
+            {"confidence",    confidence},
+        };
+    }
+
+    double score = 0.0;
+    json legend = json::object();
+    for (size_t i = 0; i < n; i++) {
+        score += i * probs[i];
+        legend[q.names[i]] = q.descriptions[i];
+    }
+
+    return json{
+        {"type",          "score"},
+        {"score",         score},
+        {"legend",        legend},
+        {"probabilities", probabilities},
+        {"confidence",    confidence},
+    };
 }
 
 json format_response_rerank(

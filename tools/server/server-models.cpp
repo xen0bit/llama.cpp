@@ -2015,6 +2015,7 @@ void server_models_routes::init_routes() {
         }
         auto res = std::make_unique<server_http_res>();
         json models_json = json::array();
+        json models_list = json::array(); // System One API format
         auto all_models = models.get_all_meta();
         std::time_t t = std::time(0);
         for (const auto & meta : all_models) {
@@ -2076,8 +2077,14 @@ void server_models_routes::init_routes() {
                 }
             }
             models_json.push_back(model_info);
+            models_list.push_back(json{
+                {"name",         meta.name},
+                {"description",  ""},
+                {"release_date", ""},
+            });
         }
         res_ok(res, {
+            {"models", models_list},
             {"data", models_json},
             {"object", "list"},
         });

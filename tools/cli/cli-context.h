@@ -45,6 +45,9 @@ struct cli_context {
     // run the interactive chat loop, returns the process exit code
     int run();
 
+    // send the --systemone request and print the response, returns the process exit code
+    int run_systemone();
+
     // stop the local server child (if any)
     void shutdown();
 

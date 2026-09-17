@@ -1496,6 +1496,17 @@ json server_task_result_rerank::to_json() {
 }
 
 //
+// server_task_result_readout
+//
+json server_task_result_readout::to_json() {
+    return json {
+        {"index",            index},
+        {"logits",           logits},
+        {"tokens_evaluated", n_tokens},
+    };
+}
+
+//
 // server_task_result_error
 //
 json server_task_result_error::to_json() {
