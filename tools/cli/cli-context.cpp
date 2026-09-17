@@ -12,6 +12,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <set>
 
@@ -96,6 +97,9 @@ bool cli_context::init() {
 
     std::optional<ui::spinner> spinner;
 
+    // keep stdout clean when the response is printed as JSON
+    const bool quiet = !params.systemone.empty();
+
     bool use_external_server = !params.server_base.empty();
     if (use_external_server) {
         std::string base = params.server_base;
@@ -104,7 +108,9 @@ bool cli_context::init() {
         }
         client.server_base = base;
 
-        spinner.emplace("Connecting to server at " + base);
+        if (!quiet) {
+            spinner.emplace("Connecting to server at " + base);
+        }
     } else {
         if (params.model.path.empty() && params.model.url.empty() &&
                 params.model.hf_repo.empty() && params.model.docker_repo.empty()) {
@@ -116,7 +122,9 @@ bool cli_context::init() {
             return false;
         }
 
-        spinner.emplace("\n\nLoading model...");
+        if (!quiet) {
+            spinner.emplace("\n\nLoading model...");
+        }
 
         server.emplace();
         if (!server->start(params)) {
@@ -166,7 +174,9 @@ bool cli_context::init() {
         }
 
         // restore the spinner for the next step
-        spinner.emplace("Waiting for server...");
+        if (!quiet) {
+            spinner.emplace("Waiting for server...");
+        }
     }
 
     fetch_server_props();
@@ -661,6 +671,34 @@ int cli_context::run() {
     }
 
     ui::show_message("\n\nExiting...");
+
+    return 0;
+}
+
+int cli_context::run_systemone() {
+    std::string body;
+    if (params.systemone == "-") {
+        body.assign(std::istreambuf_iterator<char>(std::cin), std::istreambuf_iterator<char>());
+    } else {
+        std::ifstream file(params.systemone, std::ios::binary);
+        if (!file) {
+            ui::show_error(string_format("file does not exist or cannot be opened: '%s'", params.systemone.c_str()));
+            return 1;
+        }
+        body.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    }
+
+    std::string response;
+    try {
+        response = client.post("/v1/systemone", body);
+    } catch (const std::exception & e) {
+        ui::show_error(e.what());
+        return 1;
+    }
+
+    printf("%s\n", response.c_str());
+    fflush(stdout);
+    write_output_file(response + "\n");
 
     return 0;
 }

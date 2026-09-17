@@ -622,6 +622,7 @@ struct common_params {
     int32_t timeout_read        = 3600;          // http read timeout in seconds
     int32_t timeout_write       = timeout_read;  // http write timeout in seconds
     int32_t sse_ping_interval   = 30;            // SSE ping interval in seconds
+    bool    systemone_permute   = false;         // System One: also ask each question with reversed options, average the probabilities
     int32_t n_threads_http      = -1;    // number of threads to process HTTP requests (TODO: support threadpool)
     int32_t n_cache_reuse       = 0;     // min chunk size to reuse from the cache via KV shifting
     bool    cache_prompt        = true;  // whether to enable prompt caching
@@ -661,6 +662,7 @@ struct common_params {
 
     // CLI params
     std::string server_base; // if set, connect to this server instead of starting a new one
+    std::string systemone;   // if set, send this System One request file ("-" for stdin), print the response and exit
 
     // UI configs
     bool ui = true;

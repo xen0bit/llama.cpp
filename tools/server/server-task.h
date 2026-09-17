@@ -16,6 +16,7 @@ enum server_task_type {
     SERVER_TASK_TYPE_COMPLETION,
     SERVER_TASK_TYPE_EMBEDDING,
     SERVER_TASK_TYPE_RERANK,
+    SERVER_TASK_TYPE_READOUT,
     SERVER_TASK_TYPE_INFILL,
     SERVER_TASK_TYPE_CANCEL,
     SERVER_TASK_TYPE_CONTROL,
@@ -94,6 +95,9 @@ struct task_params {
     // message spans for checkpointing
     common_chat_msg_spans message_spans;
 
+    // tokens whose logits are returned by SERVER_TASK_TYPE_READOUT
+    std::vector<llama_token> readout_tokens;
+
     // Embeddings
     int32_t embd_normalize = 2; // (-1=none, 0=max absolute int16, 1=taxicab, 2=Euclidean/L2, >2=p-norm)
 
@@ -145,6 +149,9 @@ struct server_task {
 
     // used by parallel sampling (multiple completions from same prompt)
     int id_parent  = -1;
+    // parent only: copy the state to the child tasks after this many prompt tokens (0 = after the full prompt)
+    // each child task then processes the rest of its own prompt
+    int32_t n_shared = 0;
     // temporary store of child tasks for scheduling
     // note: accessing to elements is invalid after the task is moved to server_slot
     std::vector<server_task> child_tasks;
@@ -197,6 +204,7 @@ struct server_task {
         switch (type) {
             case SERVER_TASK_TYPE_COMPLETION:
             case SERVER_TASK_TYPE_INFILL:
+            case SERVER_TASK_TYPE_READOUT:
                 return true;
             default:
                 return false;
@@ -468,6 +476,14 @@ struct server_task_result_embd : server_task_result {
 
 struct server_task_result_rerank : server_task_result {
     float score = -1e6;
+
+    int32_t n_tokens;
+
+    virtual json to_json() override;
+};
+
+struct server_task_result_readout : server_task_result {
+    std::vector<float> logits; // same order as task.params.readout_tokens
 
     int32_t n_tokens;
 

@@ -143,6 +143,7 @@
 | Argument | Explanation |
 | -------- | ----------- |
 | `--server-base URL` | connect to this server instead of starting a new one, example: 'http://localhost:8080' (default: none) |
+| `--systemone FNAME` | send a System One request (JSON file, or '-' for stdin) to POST /v1/systemone, print the response and exit |
 | `--verbose-prompt` | print a verbose prompt before generation (default: false) |
 | `--display-prompt, --no-display-prompt` | whether to print prompt at generation (default: true) |
 | `-co, --color [on\|off\|auto]` | Colorize output to distinguish prompt and user input from generations ('on', 'off', or 'auto', default: 'auto')<br/>'auto' enables colors when output is to a terminal |

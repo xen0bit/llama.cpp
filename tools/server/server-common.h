@@ -337,6 +337,28 @@ json format_embeddings_response_oaicompat(
     const json & embeddings,
     bool use_base64 = false);
 
+//
+// system one API (TypeSafe Jev compatible)
+//
+
+struct systemone_question {
+    std::string id;
+    std::string type; // "noul", "choice" or "score"
+    json instructions;
+    std::vector<std::string> names; // option names, or level indices for score
+    std::vector<json> descriptions; // same order as names
+};
+
+// validate the request; returns a list of errors in FastAPI format, empty if valid
+json systemone_parse_request(const json & body, size_t max_options, std::vector<systemone_question> & out);
+
+std::string systemone_format_system(const json & state);
+// if reverse is set, the options are shown in reverse order
+std::string systemone_format_user(const systemone_question & q, const std::vector<std::string> & labels, bool reverse);
+
+// each element of logits is one pass, in the same order as q.names; the probabilities of all passes are averaged
+json systemone_format_answer(const systemone_question & q, const std::vector<std::vector<float>> & logits);
+
 // TODO: move it to server-task.cpp
 json format_response_rerank(
         const json & request,

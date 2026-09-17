@@ -61,5 +61,9 @@ int llama_cli(int argc, char ** argv) {
         return 1;
     }
 
+    if (!params.systemone.empty()) {
+        return ctx_cli.run_systemone();
+    }
+
     return ctx_cli.run();
 }

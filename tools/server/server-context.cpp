@@ -719,6 +719,14 @@ struct server_slot {
         return res;
     }
 
+    // copy the processed prompt to a child slot, which then continues with its own prompt
+    void copy_prefix_to(server_slot & other) const {
+        mem.seq_rm(other.id,     -1, -1);
+        mem.seq_cp(id, other.id, -1, -1);
+
+        other.prompt = prompt.clone();
+    }
+
     void copy_state_to(server_slot & other) const {
         GGML_ASSERT(state == SLOT_STATE_DONE_PROMPT);
 
@@ -1636,8 +1644,8 @@ private:
         if (ret) {
             update_cache = update_cache && prompt_cache;
 
-            // cache prompts only for completion tasks
-            update_cache = update_cache && task.type == SERVER_TASK_TYPE_COMPLETION;
+            // cache prompts only for completion and readout tasks
+            update_cache = update_cache && (task.type == SERVER_TASK_TYPE_COMPLETION || task.type == SERVER_TASK_TYPE_READOUT);
 
             if (update_cache) {
                 SRV_TRC("%s", "updating prompt cache\n");
@@ -2225,6 +2233,27 @@ private:
         queue_results.send(std::move(res));
     }
 
+    void send_readout(const server_slot & slot, int32_t idx) {
+        auto res = std::make_unique<server_task_result_readout>();
+        res->id       = slot.task->id;
+        res->index    = slot.task->index;
+        res->n_tokens = slot.task->n_tokens();
+
+        const float * logits = llama_get_logits_ith(ctx_tgt, idx);
+        if (logits == nullptr) {
+            send_error(slot, "failed to get logits", ERROR_TYPE_SERVER);
+            return;
+        }
+
+        const auto & tokens = slot.task->params.readout_tokens;
+        res->logits.reserve(tokens.size());
+        for (llama_token tok : tokens) {
+            res->logits.push_back(logits[tok]);
+        }
+
+        queue_results.send(std::move(res));
+    }
+
     //
     // Functions to process the task
     //
@@ -2384,6 +2413,7 @@ private:
             case SERVER_TASK_TYPE_INFILL:
             case SERVER_TASK_TYPE_EMBEDDING:
             case SERVER_TASK_TYPE_RERANK:
+            case SERVER_TASK_TYPE_READOUT:
                 {
                     // special case: if input is provided via CLI, tokenize it first
                     // otherwise, no need to tokenize as it's already done inside the HTTP thread
@@ -3218,6 +3248,11 @@ private:
                                 // reuse any previously computed tokens that are common with the new prompt
                                 n_past = slot.prompt.tokens.get_common_prefix(input_tokens);
 
+                                // the state must be copied to the child tasks exactly at the shared prefix
+                                if (slot.task->is_parent() && slot.task->n_shared > 0) {
+                                    n_past = std::min(n_past, slot.task->n_shared);
+                                }
+
                                 // if there is an alora invoked, don't cache after the invocation start
                                 if (slot.alora_invocation_start > 0) {
                                     SLT_DBG(slot, "only caching to alora invocation start (n_past = %d, alora_invocation_start = %d)\n", n_past, slot.alora_invocation_start);
@@ -3459,8 +3494,14 @@ private:
 
                     bool do_checkpoint = params_base.n_ctx_checkpoints > 0;
 
-                    // make checkpoints only for completion tasks
-                    do_checkpoint = do_checkpoint && slot.task->type == SERVER_TASK_TYPE_COMPLETION;
+                    // make checkpoints only for completion tasks, and for readout tasks at the end of the shared prefix
+                    // note: readout prompts are short and many, a checkpoint for each one is too slow
+                    //       SWA memory can reuse the shared prefix without a checkpoint, recurrent memory cannot
+                    const bool is_readout_shared_end =
+                        slot.task->type == SERVER_TASK_TYPE_READOUT && slot.task->is_parent() &&
+                        slot.task->n_shared > 0 && slot.prompt.n_tokens() == slot.task->n_shared &&
+                        (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL || ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS);
+                    do_checkpoint = do_checkpoint && (slot.task->type == SERVER_TASK_TYPE_COMPLETION || is_readout_shared_end);
 
                     // make a checkpoint of the parts of the memory that cannot be rolled back.
                     // checkpoints are created only if:
@@ -3520,6 +3561,17 @@ private:
                     const auto & spans = slot.task->params.message_spans;
                     const auto last_user_pos = spans.last_user_message_pos();
 
+                    // the shared prefix is processed, the child tasks continue with their own prompts
+                    if (slot.task->is_parent() && slot.task->n_shared > 0 && slot.prompt.n_tokens() == slot.task->n_shared) {
+                        for (auto & other : slots) {
+                            if (other.state == SLOT_STATE_WAIT_OTHER && slot.task->id == other.task->id_parent) {
+                                SLT_TRC(slot, " - copying prefix (%d tokens) to child %d\n", slot.task->n_shared, other.id);
+                                slot.copy_prefix_to(other);
+                                other.state = SLOT_STATE_STARTED;
+                            }
+                        }
+                    }
+
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
                         // get next token to process
@@ -3545,6 +3597,11 @@ private:
                             /* output    = */ slot.need_embd(),
                             /* is_prompt = */ true);
                         slot.prompt.tokens.push_back(cur_tok);
+
+                        // stop at the shared prefix, the state is copied to the child tasks after decoding
+                        if (slot.task->is_parent() && slot.task->n_shared > 0 && slot.prompt.n_tokens() == slot.task->n_shared) {
+                            break;
+                        }
 
                         // break at the last user message, or at user messages at least min step past the last checkpoint
                         if (do_checkpoint && spans.is_user_start(slot.prompt.n_tokens())) {
@@ -3757,7 +3814,7 @@ private:
 
         // handle `n_cmpl > 1` tasks - when the main prompt is processed, activate all child tasks too
         for (auto & slot : slots) {
-            if (slot.state == SLOT_STATE_DONE_PROMPT && slot.task->is_parent()) {
+            if (slot.state == SLOT_STATE_DONE_PROMPT && slot.task->is_parent() && slot.task->n_shared == 0) {
                 std::vector<server_slot *> children;
                 for (auto & other : slots) {
                     if (other.state == SLOT_STATE_WAIT_OTHER && slot.task->id == other.task->id_parent) {
@@ -3826,6 +3883,13 @@ private:
 
                 if (slot.task->type == SERVER_TASK_TYPE_RERANK) {
                     send_rerank(slot, batch_view);
+                    slot.release();
+                    slot.i_batch = -1;
+                    return;
+                }
+
+                if (slot.task->type == SERVER_TASK_TYPE_READOUT) {
+                    send_readout(slot, slot.i_batch - off);
                     slot.release();
                     slot.i_batch = -1;
                     return;
@@ -4576,6 +4640,7 @@ static json get_res_models(const server_context_meta & meta) {
                 {"digest", ""}, // dummy value, llama.cpp does not support managing model file's hash
                 {"type", "model"},
                 {"description", ""},
+                {"release_date", ""},
                 {"tags", json::array({""})},
                 {"capabilities", meta.has_mtmd ? json::array({"completion","multimodal"}) : json::array({"completion"})},
                 {"parameters", ""},
@@ -5221,6 +5286,216 @@ void server_routes::init_routes() {
             top_n);
 
         res->ok(root);
+        return res;
+    };
+
+    this->post_systemone = [this](const server_http_req & req) {
+        auto res = create_response();
+        if (params.embedding) {
+            res->error(format_error_response("This server does not support System One. Start it without `--embedding` or `--reranking`", ERROR_TYPE_NOT_SUPPORTED));
+            return res;
+        }
+
+        // validation errors use status 422 and the FastAPI error format
+        auto res_validation = [&res](const json & detail) {
+            res->status = 422;
+            res->data   = safe_json_to_str({{"detail", detail}});
+            return std::move(res);
+        };
+
+        const json body = json::parse_no_throw(req.body);
+        if (body.is_discarded()) {
+            return res_validation(json::array({json{
+                {"loc",  json::array({"body"})},
+                {"msg",  "JSON decode error"},
+                {"type", "json_invalid"},
+            }}));
+        }
+
+        std::vector<systemone_question> questions;
+        const std::string all_labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+        json detail = systemone_parse_request(body, all_labels.size(), questions);
+        if (!detail.empty()) {
+            return res_validation(detail);
+        }
+
+        const auto * vocab = ctx_server.vocab;
+        const std::string sys = systemone_format_system(body.at("state"));
+        std::vector<raw_buffer> files; // unused
+
+        auto build_prompt = [&](const systemone_question & q, const std::vector<std::string> & labels, bool reverse, json & data) {
+            json chat = {
+                {"messages", json::array({
+                    json{{"role", "system"}, {"content", sys}},
+                    json{{"role", "user"},   {"content", systemone_format_user(q, labels, reverse)}},
+                })},
+                {"chat_template_kwargs", json{{"enable_thinking", false}}},
+            };
+            data = oaicompat_chat_params_parse(chat, meta->chat_params, files);
+
+            std::string prompt = data.at("prompt").get<std::string>();
+
+            // some templates always open a thinking block, close it so the next token is the answer
+            const std::string think_start = json_value(data, "reasoning_budget_start_tag", std::string());
+            const auto think_end = json_value(data, "reasoning_budget_end_tags", std::vector<std::string>());
+            if (!think_start.empty() && !think_end.empty() && string_ends_with(string_strip(prompt), think_start)) {
+                prompt += think_end[0];
+            }
+            return prompt;
+        };
+
+        // keep the labels that are exactly one token right after the prompt, e.g. "A" and not " A"
+        std::vector<std::string> labels;
+        std::vector<llama_token> label_tokens;
+        {
+            std::vector<std::string> candidates;
+            for (char c : all_labels) {
+                candidates.emplace_back(1, c);
+            }
+            json data;
+            const auto probe = common_tokenize(vocab, build_prompt(questions[0], candidates, false, data), true, true);
+            const llama_tokens tail_tokens(probe.end() - std::min<size_t>(probe.size(), 8), probe.end());
+            const std::string tail = common_detokenize(vocab, tail_tokens, true);
+            const auto tail_ids = common_tokenize(vocab, tail, false, true);
+            for (const auto & label : candidates) {
+                const auto ids = common_tokenize(vocab, tail + label, false, true);
+                if (ids.size() == tail_ids.size() + 1 && std::equal(tail_ids.begin(), tail_ids.end(), ids.begin()) &&
+                        std::find(label_tokens.begin(), label_tokens.end(), ids.back()) == label_tokens.end()) {
+                    labels.push_back(label);
+                    label_tokens.push_back(ids.back());
+                }
+            }
+        }
+        if (labels.size() < 2) {
+            res->error(format_error_response("the vocab or chat template of this model does not allow single-token answers", ERROR_TYPE_NOT_SUPPORTED));
+            return res;
+        }
+        for (const auto & q : questions) {
+            if (q.names.size() > labels.size()) {
+                detail.push_back(json{
+                    {"loc",  json::array({"body", "questions", q.id, "criteria"})},
+                    {"msg",  string_format("At most %zu options are supported by this model", labels.size())},
+                    {"type", "too_long"},
+                });
+            }
+        }
+        if (!detail.empty()) {
+            return res_validation(detail);
+        }
+
+        // with permute, each question is asked a second time with the options in reverse order
+        const size_t n_pass = params.systemone_permute ? 2 : 1;
+
+        std::vector<llama_tokens> prompts;
+        auto & rd = res->rd;
+        {
+            std::vector<server_task> tasks;
+            for (size_t k = 0; k < questions.size() * n_pass; k++) {
+                const size_t i       = k / n_pass;
+                const bool   reverse = k % n_pass == 1;
+
+                json data;
+                auto tokens = common_tokenize(vocab, build_prompt(questions[i], labels, reverse, data), true, true);
+
+                json delims = json_value(data, "message_delimiters", json::array());
+                auto delimiters = common_chat_msg_delimiters_parse(delims);
+                delimiters.tokenize(vocab);
+
+                server_task task = server_task(SERVER_TASK_TYPE_READOUT);
+                task.id     = rd.get_new_id();
+                task.index  = k;
+                task.params = server_schema::eval_llama_cmpl_schema(vocab, params, meta->logit_bias_eog, data);
+                task.params.readout_tokens.assign(label_tokens.begin(), label_tokens.begin() + questions[i].names.size());
+                task.tokens = server_tokens(tokens, false);
+                task.params.message_spans = task.tokens.find_message_spans(delimiters);
+
+                prompts.push_back(std::move(tokens));
+                tasks.push_back(std::move(task));
+            }
+
+            // group the tasks so that each group processes the state only once, then copies it to the other slots
+            // use groups of similar size, so that a small group does not start early on a slot without the state
+            const size_t n_slots  = std::max(1, params.n_parallel);
+            const size_t n_groups = (tasks.size() + n_slots - 1) / n_slots;
+            std::vector<server_task> groups;
+            for (size_t i_group = 0, g = 0; i_group < n_groups; i_group++) {
+                const size_t g_end = g + (tasks.size() - g + (n_groups - i_group) - 1) / (n_groups - i_group);
+
+                // every task must keep at least one token of its own after the shared prefix
+                size_t n_shared = prompts[g].size() - 1;
+                for (size_t k = g + 1; k < g_end; k++) {
+                    size_t n = 0;
+                    while (n < n_shared && n < prompts[k].size() - 1 && prompts[k][n] == prompts[g][n]) {
+                        n++;
+                    }
+                    n_shared = n;
+                }
+
+                server_task parent = std::move(tasks[g]);
+                if (g_end - g > 1 && n_shared > 0) {
+                    parent.n_shared = n_shared;
+                    for (size_t k = g + 1; k < g_end; k++) {
+                        tasks[k].id_parent = parent.id;
+                        parent.child_tasks.push_back(std::move(tasks[k]));
+                    }
+                    groups.push_back(std::move(parent));
+                } else {
+                    groups.push_back(std::move(parent));
+                    for (size_t k = g + 1; k < g_end; k++) {
+                        groups.push_back(std::move(tasks[k]));
+                    }
+                }
+                g = g_end;
+            }
+            rd.post_tasks(std::move(groups));
+        }
+
+        auto all_results = rd.wait_for_all(req.should_stop);
+        if (all_results.is_terminated) {
+            return res; // connection is closed
+        }
+        if (all_results.error) {
+            res->error(all_results.error->to_json());
+            return res;
+        }
+
+        std::vector<std::vector<std::vector<float>>> logits(questions.size());
+        for (auto & res_task : all_results.results) {
+            auto * r = dynamic_cast<server_task_result_readout*>(res_task.get());
+            GGML_ASSERT(r != nullptr);
+            auto cur = r->logits;
+            if (r->index % n_pass == 1) {
+                std::reverse(cur.begin(), cur.end());
+            }
+            logits[r->index / n_pass].push_back(std::move(cur));
+        }
+
+        json answers = json::object();
+        for (size_t i = 0; i < questions.size(); i++) {
+            answers[questions[i].id] = systemone_format_answer(questions[i], logits[i]);
+        }
+
+        // the state prefix is shared by all questions, count it once
+        size_t n_shared = prompts[0].size();
+        size_t n_input  = 0;
+        for (const auto & p : prompts) {
+            size_t n = 0;
+            while (n < n_shared && n < p.size() && p[n] == prompts[0][n]) {
+                n++;
+            }
+            n_shared = n;
+            n_input += p.size();
+        }
+        n_input -= n_shared * (prompts.size() - 1);
+
+        res->ok(json{
+            {"model",   meta->model_name},
+            {"answers", answers},
+            {"usage",   json{
+                {"input_tokens",  n_input},
+                {"output_tokens", prompts.size()},
+            }},
+        });
         return res;
     };
 

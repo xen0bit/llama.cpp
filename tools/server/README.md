@@ -209,6 +209,7 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--ui, --webui, --no-ui, --no-webui` | whether to enable the Web UI (default: enabled)<br/>(env: LLAMA_ARG_UI) |
 | `--embedding, --embeddings` | restrict to only support embedding use case; use only with dedicated embedding models (default: disabled)<br/>(env: LLAMA_ARG_EMBEDDINGS) |
 | `--rerank, --reranking` | enable reranking endpoint on server (default: disabled)<br/>(env: LLAMA_ARG_RERANKING) |
+| `--systemone-permute` | System One API: also evaluate each question with the options in reverse order and average the probabilities; reduces option order bias, doubles the question tokens (default: disabled)<br/>(env: LLAMA_ARG_SYSTEMONE_PERMUTE) |
 | `--api-key KEY` | API key to use for authentication, multiple keys can be provided as a comma-separated list (default: none)<br/>(env: LLAMA_API_KEY) |
 | `--api-key-file FNAME` | path to file containing API keys, one per line; lines starting with a hash are treated as comments (default: none)<br/>(env: LLAMA_ARG_API_KEY_FILE) |
 | `--ssl-key-file FNAME` | path to file a PEM-encoded SSL private key<br/>(env: LLAMA_ARG_SSL_KEY_FILE) |
@@ -1636,6 +1637,70 @@ curl http://localhost:8080/v1/messages/count_tokens \
 
 ```json
 {"input_tokens": 10}
+```
+
+## System One API Endpoints
+
+### POST `/v1/systemone`: TypeSafe System One compatible API
+
+Answers typed questions about a `state`, following the [TypeSafe API](https://docs.typesafe.ai/api). The official TypeSafe client SDKs work with this endpoint.
+
+Each question is answered with one forward pass of a normal chat model: the options are shown to the model with single-token labels (`A`, `B`, ...), and the probabilities come from the logits of these labels. No token is generated.
+
+Question types:
+
+- `noul`: yes/no question, returns `noul`, the probability of yes. Optional `criteria` with `true` and `false` descriptions.
+- `choice`: returns the best option `choice`, `probabilities` for each option and `confidence`. `criteria` maps option names to descriptions (or `null`).
+- `score`: returns `score`, the probability-weighted level index, plus `legend`, `probabilities` and `confidence`. `criteria` is an ordered list of at least 2 levels.
+
+`instructions` and all descriptions can be a string, an object, an array or `null`. The number of options is limited by the number of single-token labels of the model (at most 52).
+
+`confidence` is `(p_max - 1/n) / (1 - 1/n)`, so a uniform distribution gives 0 and a certain answer gives 1.
+
+All questions share the same state, which is placed first in the prompt so it can be reused from the prompt cache. The `model` field is required but not used in single-model mode. Invalid requests return status `422` with a FastAPI-style `detail` list.
+
+*Example:*
+
+```shell
+curl http://localhost:8080/v1/systemone \
+  -H "Content-Type: application/json" \
+  -d '{
+    "state": "Help! My payouts have been failing for 3 days.",
+    "model": "jev-latest",
+    "questions": {
+      "is_urgent": {"type": "noul", "instructions": "Does this convey urgency?"},
+      "department": {"type": "choice", "instructions": "Which team should handle this?", "criteria": {"billing": "Payments, invoicing, refunds", "technical": "Bugs, outages, integrations"}},
+      "frustration": {"type": "score", "instructions": "How frustrated is the customer?", "criteria": ["Calm", "Frustrated", "Very angry"]}
+    }
+  }'
+```
+
+*Response:*
+
+```json
+{
+  "model": "LFM2.5-2.6B-Q5_K_M.gguf",
+  "answers": {
+    "is_urgent": {"type": "noul", "noul": 0.99},
+    "department": {"type": "choice", "choice": "technical", "probabilities": {"billing": 0.36, "technical": 0.64}, "confidence": 0.28},
+    "frustration": {"type": "score", "score": 1.18, "legend": {"0": "Calm", "1": "Frustrated", "2": "Very angry"}, "probabilities": {"0": 0.29, "1": 0.24, "2": 0.47}, "confidence": 0.2}
+  },
+  "usage": {"input_tokens": 223, "output_tokens": 3}
+}
+```
+
+To use the TypeSafe SDKs, point them to the server. The SDKs require an API key, so set it to any value if the server has no `--api-key`. The default SDK timeout is 10 seconds and timed out requests are retried, so increase it for slow hardware:
+
+```shell
+export TYPESAFE_BASE_URL=http://localhost:8080
+export TYPESAFE_API_KEY=dummy
+```
+
+`llama-cli` can send a single request and print the response:
+
+```shell
+llama-cli -m model.gguf --systemone request.json
+cat request.json | llama-cli --server-base http://localhost:8080 --systemone -
 ```
 
 ## Server tools

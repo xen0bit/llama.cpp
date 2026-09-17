@@ -1479,6 +1479,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
+        {"--systemone"}, "FNAME",
+        "send a System One request (JSON file, or '-' for stdin) to POST /v1/systemone, print the response and exit",
+        [](common_params & params, const std::string & value) {
+            params.systemone = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_CLI}));
+    add_opt(common_arg(
         {"--verbose-prompt"},
         string_format("print a verbose prompt before generation (default: %s)", params.verbose_prompt ? "true" : "false"),
         [](common_params & params) {
@@ -3475,6 +3482,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.pooling_type = LLAMA_POOLING_TYPE_RANK;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_RERANKING"));
+    add_opt(common_arg(
+        {"--systemone-permute"},
+        string_format("System One API: also evaluate each question with the options in reverse order and average the probabilities; reduces option order bias, doubles the question tokens (default: %s)", params.systemone_permute ? "enabled" : "disabled"),
+        [](common_params & params) {
+            params.systemone_permute = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SYSTEMONE_PERMUTE"));
     add_opt(common_arg(
         {"--api-key"}, "KEY",
         "API key to use for authentication, multiple keys can be provided as a comma-separated list (default: none)",
