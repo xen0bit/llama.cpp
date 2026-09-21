@@ -103,3 +103,32 @@ def test_systemone_permute(monkeypatch):
     rev = ask({"wrong_item": None, "late": None, "damaged": None})
     for k in fwd:
         assert fwd[k] == pytest.approx(rev[k], abs=1e-3)
+
+
+def test_systemone_swa_short_state_reuses_prefix():
+    # On one slot every question is its own task, and each one after the first
+    # has to reuse the state the previous task left in the cache. With a
+    # sliding-window model and a prompt shorter than the window, pos_min and the
+    # threshold it is compared with are both 0, and a complete cache used to be
+    # thrown away -- every question paid for the whole state again.
+    global server
+    server = ServerPreset.tinygemma3()
+    server.n_slots = 1
+    server.server_metrics = True
+    server.start()
+
+    questions = {f"q{i}": {"type": "noul", "instructions": f"Is statement {i} true?"} for i in range(4)}
+    res = server.make_request("POST", "/v1/systemone", data={
+        "state": "The sky is blue and the grass is green.",
+        "model": "jev-latest",
+        "questions": questions,
+    })
+    assert res.status_code == 200
+    # input_tokens counts the shared state once, which is exactly what should
+    # have been processed when every follow-up reuses it.
+    want = res.body["usage"]["input_tokens"]
+
+    metrics = server.make_request("GET", "/metrics").body
+    processed = next(float(line.split(" ", 1)[1]) for line in metrics.splitlines()
+                     if line.startswith("llamacpp:prompt_tokens_total "))
+    assert processed <= want + len(questions), f"processed {processed} prompt tokens, want at most {want + len(questions)}"
