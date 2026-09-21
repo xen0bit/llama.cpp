@@ -3381,7 +3381,11 @@ private:
                                     SLT_WRN(slot, "%s\n", st1.str().c_str());
                                 }
 
-                                if (pos_min >= pos_min_thold) {
+                                // pos_min == 0 means the memory still holds the sequence from its start, so
+                                // nothing the new tokens attend to has been pruned. Without this guard every
+                                // prompt shorter than n_swa has pos_min_thold == 0 as well, and a cache that is
+                                // complete is thrown away and processed again.
+                                if (pos_min > 0 && pos_min >= pos_min_thold) {
                                     // search for a context checkpoint
                                     const auto it = std::find_if(
                                         slot.prompt.checkpoints.rbegin(),
