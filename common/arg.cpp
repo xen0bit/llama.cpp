@@ -3490,6 +3490,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SYSTEMONE_PERMUTE"));
     add_opt(common_arg(
+        {"--wsp-patch"},
+        "enable POST /wsp/tensors, which writes raw bytes into the loaded model's weight tensors (development only; use with --load-mode none)",
+        [](common_params & params) {
+            params.wsp_patch = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--api-key"}, "KEY",
         "API key to use for authentication, multiple keys can be provided as a comma-separated list (default: none)",
         [](common_params & params, const std::string & value) {

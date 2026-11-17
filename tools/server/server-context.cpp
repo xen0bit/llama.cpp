@@ -5293,6 +5293,46 @@ void server_routes::init_routes() {
         return res;
     };
 
+    // body: repeated records of [u32 name_len][name][u64 offset][u64 size][size bytes]
+    // writes raw bytes into the named weight tensors of the loaded model. Not synchronized with
+    // inference: callers must not send it while a request is running, and must erase the slot
+    // caches afterwards (POST /slots/<id>?action=erase).
+    this->post_wsp_tensor = [this](const server_http_req & req) {
+        auto res = create_response();
+        const std::string & b = req.body;
+        size_t pos = 0, n_bytes = 0, n_writes = 0;
+        auto take = [&](void * dst, size_t n) {
+            if (pos + n > b.size()) throw std::invalid_argument("truncated body");
+            memcpy(dst, b.data() + pos, n);
+            pos += n;
+        };
+        try {
+            while (pos < b.size()) {
+                uint32_t name_len; uint64_t offset, size;
+                take(&name_len, sizeof(name_len));
+                if (pos + name_len > b.size()) throw std::invalid_argument("truncated name");
+                std::string name = b.substr(pos, name_len);
+                pos += name_len;
+                take(&offset, sizeof(offset));
+                take(&size, sizeof(size));
+                if (pos + size > b.size()) throw std::invalid_argument("truncated data");
+                ggml_tensor * t = llama_model_get_tensor(ctx_server.model_tgt, name.c_str());
+                if (!t) throw std::invalid_argument("no tensor " + name);
+                if (offset + size > ggml_nbytes(t)) throw std::invalid_argument("write out of range for " + name);
+                if (!t->buffer) throw std::invalid_argument("tensor has no backend buffer: " + name);
+                ggml_backend_tensor_set(t, b.data() + pos, offset, size);
+                pos += size;
+                n_bytes += size;
+                n_writes++;
+            }
+        } catch (const std::exception & e) {
+            res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+        res->ok({{"writes", n_writes}, {"bytes", n_bytes}});
+        return res;
+    };
+
     this->post_systemone = [this](const server_http_req & req) {
         auto res = create_response();
         if (params.embedding) {

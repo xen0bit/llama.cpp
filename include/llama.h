@@ -648,6 +648,10 @@ extern "C" {
     // Returns the total number of parameters in the model
     LLAMA_API uint64_t llama_model_n_params(const struct llama_model * model);
 
+    // Get a model weight tensor by name (e.g. "blk.0.ffn_down.weight"), or NULL.
+    // Writing to it (ggml_backend_tensor_set) changes the weights of the loaded model.
+    LLAMA_API struct ggml_tensor * llama_model_get_tensor(const struct llama_model * model, const char * name);
+
     // Returns true if the model contains an encoder that requires llama_encode() call
     LLAMA_API bool llama_model_has_encoder(const struct llama_model * model);
 
