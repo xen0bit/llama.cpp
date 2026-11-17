@@ -3177,6 +3177,10 @@ const char * llama_model_chat_template(const llama_model * model, const char * n
     return it->second.c_str();
 }
 
+ggml_tensor * llama_model_get_tensor(const llama_model * model, const char * name) {
+    return const_cast<ggml_tensor *>(model->get_tensor(name));
+}
+
 uint64_t llama_model_n_params(const llama_model * model) {
     return model->n_elements();
 }
